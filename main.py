@@ -1,13 +1,13 @@
 import os
 import wave
 import requests
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
-# 実行環境はPowerShell(Windows)なので、ローカルホスト指定で完璧に動きます
+# VOICEVOX設定
 VOICEVOX_URL = "http://127.0.0.1:50021"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -15,9 +15,10 @@ if not GEMINI_API_KEY:
     print("【エラー】GEMINI_API_KEY が .env に設定されていません。")
     exit(1)
 
-# Geminiの設定
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Geminiの新しいクライアント設定
+client = genai.Client(api_key=GEMINI_API_KEY)
+# 最新のモデルに変更
+MODEL_ID = "gemini-2.5-flash"
 
 def generate_voicevox_audio(text, speaker_id, speed_scale=1.0):
     """VOICEVOXにテキストを送り、指定した話速で音声バイナリを生成する"""
@@ -54,7 +55,11 @@ def rewrite_text_by_gemini(original_text, target_sec):
         f"約{target_length}文字の自然な話し言葉に要約してください。\n\n"
         f"【原稿】\n{original_text}"
     )
-    response = model.generate_content(prompt)
+    # 新しいAPIの呼び出し方
+    response = client.models.generate_content(
+        model=MODEL_ID,
+        contents=prompt,
+    )
     return response.text.strip()
 
 def fit_audio_to_target(text, speaker_id, target_sec, output_filename="output.wav"):
