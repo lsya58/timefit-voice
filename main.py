@@ -18,7 +18,7 @@ if not GEMINI_API_KEY:
 # Geminiの新しいクライアント設定
 client = genai.Client(api_key=GEMINI_API_KEY)
 # 最新のモデルに変更
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = "gemini-3.8-flash"
 
 def generate_voicevox_audio(text, speaker_id, speed_scale=1.0):
     """VOICEVOXにテキストを送り、指定した話速で音声バイナリを生成する"""
