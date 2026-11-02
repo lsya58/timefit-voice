@@ -1,0 +1,11 @@
+# 環境変数ファイル
+.env
+
+# Pythonのキャッシュと仮想環境
+__pycache__/
+venv/
+*.pyc
+
+# 実行時に生成される一時ファイル
+temp.wav
+output.wav
