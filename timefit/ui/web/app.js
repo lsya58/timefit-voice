@@ -272,7 +272,9 @@ function rowHtml(ln, i) {
   const text = r ? r.text : ln.text;
   const spk = ln.speakerFromFile ? `<span class="spk">${esc(speakerName(ln.speaker))}</span>` : "";
   const orig = r && r.rewritten ? `<div class="orig" title="${esc(r.original)}">${esc(r.original)}</div>` : "";
-  const msg = r && !r.ok ? `<div class="msg">${esc(r.message.split("（詳細")[0])}</div>` : "";
+  const msg = r && !r.ok
+    ? `<div class="msg">${esc(r.message.split("（詳細")[0])}</div>`
+    : r && r.warning ? `<div class="msg quality-warn">⚠ ${esc(r.warning)}</div>` : "";
   let cta = "";
   if (r && r.rewritten && !r.approved && state.done) cta = `<button class="review-cta" data-review="${ln.index}">✎ AI が書き換えました · 確認する</button>`;
   else if (r && r.rewritten && r.approved) cta = `<button class="review-cta done" data-review="${ln.index}">✓ 確認済み</button>`;
@@ -333,6 +335,7 @@ function renderStats() {
     ["speed", "» 話速", n(["speed"])],
     ["rewrite", "✎ 要約", n(["rewrite"])],
     ["failed", "⚠ 収まらず", n(["failed"])],
+    ["failed", "⚠ 長い無音", vals.filter((r) => Boolean(r.warning)).length],
     ["rewrite", "要確認", vals.filter((r) => r.rewritten && !r.approved).length],
   ].filter((x) => x[2] > 0);
   el.innerHTML = items.map(([k, label, c]) => `<span class="stat" data-st="${k}">${label} <b>${c}</b></span>`).join("");
@@ -355,6 +358,7 @@ function showTip(e, index) {
   ];
   if (r) {
     rows.push(["話している部分", sec(r.speech)], ["話速", `×${r.speed.toFixed(2)}`]);
+    if (r.padding >= 0.005) rows.push(["追加した末尾無音", sec(r.padding)]);
     if (r.pause < 0.999) rows.push(["句読点の間", `×${r.pause.toFixed(2)}`]);
     const t = r.timing;
     if (t) {
@@ -444,9 +448,10 @@ window.tf = {
         renderStats();
         const toReview = Object.values(state.results).filter((r) => r.rewritten).length;
         let msg = s.failed ? `完了しました。${s.failed} 行は目標に収まりませんでした（⚠ の行の原稿を短くしてください）。` : "完了しました。すべての行が目標の尺に収まりました。";
+        if (s.warnings) msg += ` ${s.warnings} 行に長い末尾無音があります。⚠ の行で、意図した間か確認してください。`;
         if (toReview) msg += ` AI が書き換えた ${toReview} 行は「確認する」から内容を確かめてください。`;
         if (s.skipped) msg += ` 無料版のため ${s.skipped} 行は処理していません。`;
-        toast(msg, Boolean(s.failed), 7000);
+        toast(msg, Boolean(s.failed || s.warnings), 9000);
         break;
       }
       case "error":

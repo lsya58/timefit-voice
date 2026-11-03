@@ -47,6 +47,10 @@ class JobSummary:
     def failed(self) -> int:
         return sum(1 for r in self.results if not r.ok)
 
+    @property
+    def quality_warnings(self) -> int:
+        return sum(1 for r in self.results if r.quality_warning)
+
     def counts(self) -> dict[str, int]:
         c = {s.value: 0 for s in FitStatus}
         for r in self.results:
@@ -137,6 +141,8 @@ def run_job(
         log(f"  {stats.summary()}")
         if not result.ok:
             log(f"  ⚠ {result.message}")
+        elif result.quality_warning:
+            log(f"  ⚠ 品質確認: {result.quality_warning}")
         if llm_error is not None:
             result.message = f"{result.message or 'AI の要約に失敗しました'}（詳細: {llm_error}）"
         summary.results.append(result)
@@ -160,6 +166,8 @@ def run_job(
             log(f"  AI: 成功したモデル {used} / トークン 入力{t.in_tokens}・出力{t.out_tokens}・思考{t.thought_tokens}")
     c = summary.counts()
     log("完了: " + "、".join(f"{k} {v}件" for k, v in c.items() if v))
+    if summary.quality_warnings:
+        log(f"※ {summary.quality_warnings}行に長い末尾無音があります。画面または report.csv の「品質警告」を確認してください。")
     log(f"出力先: {out}")
     return summary
 

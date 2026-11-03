@@ -73,6 +73,25 @@ class FitResult:
     def rewritten(self) -> bool:
         return self.text != self.original_text
 
+    @property
+    def padding_sec(self) -> float:
+        """尺をそろえるため合成音声の末尾に追加した無音。"""
+        return max(0.0, self.duration - self.speech_sec)
+
+    @property
+    def quality_warning(self) -> str:
+        """完成音声として確認が必要な、長すぎる末尾無音を知らせる。
+
+        短い余韻まで大量に警告しないよう、2秒以上かつ枠の半分以上を
+        追加無音が占める場合だけ対象にする。字幕時刻はここでは変更しない。
+        """
+        if self.padding_sec >= 2.0 and self.padding_sec >= self.target_sec * 0.5:
+            return (
+                f"発話後に {self.padding_sec:.2f}秒の無音があります。"
+                "意図した間か、元の字幕時刻または原稿を確認してください。"
+            )
+        return ""
+
 
 @dataclass
 class _Attempt:

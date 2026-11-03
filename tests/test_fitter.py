@@ -20,6 +20,21 @@ def test_short_text_is_padded_to_exact_length():
     assert r.speed == 1.0
 
 
+def test_short_speech_in_long_slot_has_quality_warning():
+    r = fit_text("あいう", 3, 10.0, FakeEngine(), None)
+    assert r.ok
+    assert r.speech_sec == pytest.approx(0.65, abs=0.001)
+    assert r.padding_sec == pytest.approx(9.35, abs=0.001)
+    assert "末尾" not in r.quality_warning  # 利用者向けには「発話後」と表現する
+    assert "発話後に 9.35秒の無音" in r.quality_warning
+
+
+def test_ordinary_short_padding_has_no_quality_warning():
+    r = fit_text(TEN_CHARS, 3, 3.0, FakeEngine(), None)
+    assert r.padding_sec == pytest.approx(1.3, abs=0.001)
+    assert r.quality_warning == ""
+
+
 def test_within_mode_keeps_short_audio():
     r = fit_text(TEN_CHARS, 3, 3.0, FakeEngine(), None, FitSettings(mode=FitMode.WITHIN))
     assert r.status == FitStatus.NATURAL

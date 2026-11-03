@@ -66,6 +66,8 @@ def _result_dict(index: int, r: FitResult, filename: str, approved: bool = False
         "candidates": list(r.candidates),
         "approved": approved,
         "message": r.message,
+        "padding": r.padding_sec,
+        "warning": r.quality_warning,
         "file": filename,
         "timing": r.timing.as_dict() if r.timing is not None else None,
     }
@@ -226,6 +228,7 @@ class Api:
             self._emit("done", summary={
                 "count": len(summary.results),
                 "failed": summary.failed,
+                "warnings": summary.quality_warnings,
                 "skipped": summary.skipped_by_limit,
                 "cancelled": summary.cancelled,
                 "counts": summary.counts(),

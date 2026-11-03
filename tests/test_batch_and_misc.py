@@ -1,3 +1,5 @@
+import csv
+
 import pytest
 import requests
 
@@ -26,6 +28,22 @@ def test_place_clips_positions():
     assert out.n_frames == 100
     assert out.frames[50 * 2:60 * 2] == a.frames
     assert out.frames[20 * 2:50 * 2] == b"\x00" * 60
+
+
+def test_padded_clip_is_placed_once_at_subtitle_start():
+    clip = WavData(b"\x01\x00" * 20 + b"\x00\x00" * 80, 100, 1, 2)
+    out = place_clips([(2.0, clip)], 4.0)
+    assert out.frames[:200 * 2] == b"\x00" * 200 * 2
+    assert out.frames[200 * 2:220 * 2] == b"\x01\x00" * 20
+    assert out.frames[220 * 2:] == b"\x00" * (400 - 220) * 2
+
+
+def test_adjacent_clips_have_no_extra_gap():
+    a = WavData(b"\x01\x00" * 50, 100, 1, 2)
+    b = WavData(b"\x02\x00" * 50, 100, 1, 2)
+    out = place_clips([(0.0, a), (0.5, b)], 1.0)
+    assert out.frames[:50 * 2] == a.frames
+    assert out.frames[50 * 2:] == b.frames
 
 
 # ---------- 一括処理 ----------
@@ -57,6 +75,29 @@ def test_run_job_writes_all_outputs(tmp_path):
     assert combined.duration == pytest.approx(5.0, abs=0.001)
     assert "VOICEVOX:ずんだもん" in (out / "credits.txt").read_text(encoding="utf-8")
     assert "要約" in (out / "report.csv").read_text(encoding="utf-8-sig")
+
+
+def test_report_distinguishes_padding_from_subtitle_gap(tmp_path):
+    src = tmp_path / "gaps.srt"
+    src.write_text("""1
+00:00:01,000 --> 00:00:11,000
+あいう
+
+2
+00:00:16,000 --> 00:00:18,000
+えお
+""", encoding="utf-8")
+    out = tmp_path / "out"
+    logs = []
+    summary = batch.run_job(src, out, AppConfig(), engine=FakeEngine(), rewriter=None, log=logs.append)
+    assert summary.quality_warnings == 1
+    with (out / "report.csv").open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert float(rows[0]["実発話秒数"]) == pytest.approx(0.65, abs=0.001)
+    assert float(rows[0]["追加無音秒数"]) == pytest.approx(9.35, abs=0.001)
+    assert float(rows[0]["次字幕までの空白秒数"]) == pytest.approx(5.0)
+    assert "発話後" in rows[0]["品質警告"]
+    assert any("長い末尾無音" in m for m in logs)
 
 
 def test_free_edition_limits_lines(tmp_path, monkeypatch):
@@ -308,6 +349,23 @@ def test_refit_line_too_long_reports_failure(tmp_path):
     summary, _ = _job(tmp_path)
     r = batch.refit_line(summary, 2, "あ" * 60, AppConfig(), engine=FakeEngine(), log=lambda m: None)
     assert r.status.value == "収まらず" and "この文では長すぎます" in r.message
+
+
+def test_refit_line_recalculates_padding_warning_and_outputs(tmp_path):
+    src = tmp_path / "long-slot.srt"
+    src.write_text("""1
+00:00:00,000 --> 00:00:10,000
+あいうえお
+""", encoding="utf-8")
+    cfg = AppConfig()
+    summary = batch.run_job(src, tmp_path / "out", cfg, engine=FakeEngine(), rewriter=None, log=lambda m: None)
+    result = batch.refit_line(summary, 1, "あ", cfg, engine=FakeEngine(), log=lambda m: None)
+    assert result.quality_warning
+    assert summary.quality_warnings == 1
+    report = (tmp_path / "out" / "report.csv").read_text(encoding="utf-8-sig")
+    assert "発話後に" in report
+    combined = parse_wav((tmp_path / "out" / "combined.wav").read_bytes())
+    assert combined.duration == pytest.approx(10.0, abs=0.001)
 
 
 def test_add_candidates_asks_for_different_ones(tmp_path):

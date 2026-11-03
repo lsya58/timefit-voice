@@ -49,7 +49,8 @@ def write_srt(path: Path, lines: list[ScriptLine], results: list[FitResult]) -> 
 
 
 REPORT_HEADER = [
-    "番号", "状態", "目標秒数", "生成秒数", "話速", "間", "要約回数", "ファイル", "元の原稿", "最終原稿", "メモ",
+    "番号", "状態", "目標秒数", "生成秒数", "実発話秒数", "追加無音秒数", "次字幕までの空白秒数",
+    "話速", "間", "要約回数", "ファイル", "元の原稿", "最終原稿", "メモ", "品質警告",
     "処理秒数", "AI秒数", "AI呼び出し", "AIエラー", "合成秒数", "合成回数",
 ]
 
@@ -59,11 +60,16 @@ def write_report(path: Path, lines: list[ScriptLine], results: list[FitResult], 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(REPORT_HEADER)
-        for ln, r, name in zip(lines, results, files):
+        for i, (ln, r, name) in enumerate(zip(lines, results, files)):
+            if i + 1 < len(lines) and ln.start_sec is not None and lines[i + 1].start_sec is not None:
+                subtitle_gap = max(0.0, lines[i + 1].start_sec - (ln.start_sec + ln.target_sec))
+            else:
+                subtitle_gap = 0.0
             w.writerow([
                 ln.index, r.status.value, f"{r.target_sec:.3f}", f"{r.duration:.3f}",
+                f"{r.speech_sec:.3f}", f"{r.padding_sec:.3f}", f"{subtitle_gap:.3f}",
                 f"{r.speed:.2f}", f"{r.pause_scale:.2f}", r.rewrite_attempts, name,
-                r.original_text, r.text, r.message, *_timing_cells(r.timing),
+                r.original_text, r.text, r.message, r.quality_warning, *_timing_cells(r.timing),
             ])
 
 
