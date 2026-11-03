@@ -8,6 +8,7 @@
 最後に、足りない分は無音を足し、わずかなはみ出しは末尾の無音を削って、目標の長さちょうどにする。
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
@@ -151,13 +152,26 @@ class _Candidate:
     plan: tuple[float, float] | None
 
 
-def _evaluate(engine, texts: list[str], speaker, target_sec, s) -> list[_Candidate]:
+_POLITE_END = re.compile(r"(です|ます|ました|でした|ません|でしょう|ください)[ねよか]?[。！？!?…]*$")
+
+
+def is_polite(text: str) -> bool:
+    """文末が「です・ます」調か"""
+    return bool(_POLITE_END.search(text.strip()))
+
+
+def _evaluate(engine, texts: list[str], speaker, target_sec, s, original: str | None = None) -> list[_Candidate]:
     out = []
     for t in texts:
         q = engine.audio_query(t, speaker)
         out.append(_Candidate(t, q, estimate_duration(with_prosody(q, 1.0, 1.0)), plan_prosody(q, target_sec, s)))
-    # 収まる案を先に、その中では情報が多い（長い）順に試す
-    return sorted(out, key=lambda c: (c.plan is None, -c.natural))
+    polite = is_polite(original) if original else None
+
+    def style_mismatch(c):
+        return polite is not None and is_polite(c.text) != polite
+
+    # 収まる案を先に。その中では元の原稿と語尾の調子が同じ案、さらに情報が多い（長い）案を優先する
+    return sorted(out, key=lambda c: (c.plan is None, style_mismatch(c), -c.natural))
 
 
 def fit_text(
@@ -186,7 +200,7 @@ def fit_text(
     shortest: _Candidate | None = None
 
     while True:
-        for cand in _evaluate(engine, pending, speaker, target_sec, s):
+        for cand in _evaluate(engine, pending, speaker, target_sec, s, original):
             if shortest is None or cand.natural < shortest.natural:
                 shortest = cand
             if cand.plan is None:

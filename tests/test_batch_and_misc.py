@@ -5,7 +5,7 @@ from timefit import batch, edition
 from timefit.audio import WavData, fit_length, parse_wav, place_clips
 from timefit.config import AppConfig, load_config, save_config
 from timefit.engine import VoicevoxClient
-from timefit.errors import ApiKeyInvalidError, ConfigError, EngineNotRunningError, LLMError
+from timefit.errors import ApiKeyInvalidError, ConfigError, EngineNotRunningError, InputFileError, LLMError
 from timefit.llm import GeminiRewriter, parse_candidates, sanitize_output
 
 from .fakes import RATE, FakeEngine, FakeRewriter
@@ -337,3 +337,20 @@ def test_old_default_models_are_migrated_but_user_choices_are_kept(tmp_path, mon
 
     path.write_text('{"gemini_model": "gemini-3.8-flash", "gemini_fallback_model": "my-model"}', encoding="utf-8")
     assert load_config(path).gemini_model == "gemini-3.8-flash"
+
+
+def test_unknown_speaker_id_is_reported_before_processing(tmp_path):
+    src = tmp_path / "s.csv"
+    src.write_text("3,2,あいう\n999,2,えお\n", encoding="utf-8")
+    engine = FakeEngine()
+    with pytest.raises(InputFileError, match="話者ID 999"):
+        batch.run_job(src, tmp_path / "o", AppConfig(), engine=engine, log=lambda m: None)
+    assert engine.synth_calls == []  # 1行も作らずに止める
+
+
+def test_slow_synthesis_hint():
+    from timefit.timing import Stats
+
+    results = [type("R", (), {"speech_sec": 10.0})()]
+    assert batch.synthesis_speed_hint(Stats(synth_sec=16.0, synth_calls=3), results).count("1.6倍")
+    assert batch.synthesis_speed_hint(Stats(synth_sec=2.0, synth_calls=3), results) is None

@@ -9,7 +9,7 @@ from typing import Callable
 from . import edition
 from .config import AppConfig
 from .engine import VoicevoxClient
-from .errors import ApiKeyMissingError, EngineError, LLMError, TimeFitError
+from .errors import ApiKeyMissingError, EngineError, InputFileError, LLMError, TimeFitError
 from .fitter import FitResult, FitStatus, fit_text, plan_prosody, rewrite_target_chars
 from .engine import estimate_duration, with_prosody
 from .inputs import ScriptLine, load_script
@@ -97,6 +97,7 @@ def run_job(
 
     summary = JobSummary(output_dir=Path(output_dir), kind=script.kind)
     summary.timing = rec.total
+    check_speakers(lines, cfg, engine)
     limit = edition.line_limit()
     if limit is not None and len(lines) > limit:
         summary.skipped_by_limit = len(lines) - limit
@@ -151,6 +152,9 @@ def run_job(
         save_sec = time.perf_counter() - t0
         t = rec.total
         log(f"処理時間の内訳: {t.summary()}、ファイル保存 {save_sec:.1f}秒")
+        hint = synthesis_speed_hint(t, summary.results)
+        if hint:
+            log(hint)
         if t.ai_calls:
             used = "、".join(f"{m}×{n}" for m, n in t.models.items()) or "なし"
             log(f"  AI: 成功したモデル {used} / トークン 入力{t.in_tokens}・出力{t.out_tokens}・思考{t.thought_tokens}")
@@ -158,6 +162,39 @@ def run_job(
     log("完了: " + "、".join(f"{k} {v}件" for k, v in c.items() if v))
     log(f"出力先: {out}")
     return summary
+
+
+def check_speakers(lines: list[ScriptLine], cfg: AppConfig, engine) -> None:
+    """処理を始める前に、使えない話者IDがないか確かめる（途中で止まらないように）"""
+    try:
+        available = {s.style_id for s in engine.speakers()}
+    except EngineError:
+        return  # 一覧が取れないエンジンでは確認しない
+    bad = []
+    for ln in lines:
+        sid = ln.speaker_id if ln.speaker_id is not None else cfg.default_speaker
+        if sid not in available:
+            where = f"{ln.index}番目の行（{ln.text[:12]}…）" if ln.speaker_id is not None else "画面で選んだ話者"
+            bad.append(f"・{where}: 話者ID {sid}")
+    if bad:
+        shown = "\n".join(bad[:5]) + (f"\n…ほか {len(bad) - 5} 件" if len(bad) > 5 else "")
+        raise InputFileError(
+            "使えない話者IDがあります。VOICEVOX の話者一覧（画面の「話者」）にある ID に直してから実行してください。\n" + shown
+        )
+
+
+def synthesis_speed_hint(t: Stats, results: list[FitResult]) -> str | None:
+    """合成が遅い（話している時間の半分以上かかる）ときに、VOICEVOX 側の設定を案内する"""
+    spoken = sum(r.speech_sec for r in results)
+    if spoken <= 0 or t.synth_calls == 0:
+        return None
+    ratio = t.synth_sec / spoken
+    if ratio < 0.5:
+        return None
+    return (
+        f"※ 音声合成に、話している時間の約{ratio:.1f}倍かかっています。"
+        "VOICEVOX の設定で「GPU モード」（対応 PC のみ）にするか、「CPU スレッド数」を増やすと速くなります。"
+    )
 
 
 def write_outputs(summary: JobSummary, cfg: AppConfig, engine, log: Log) -> None:

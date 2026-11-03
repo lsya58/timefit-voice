@@ -116,3 +116,18 @@ def test_output_is_valid_wav():
     again = parse_wav(r.wav.to_bytes())
     assert again.n_frames == frames(2.0)
     assert again.rate == RATE
+
+
+def test_candidate_with_same_tone_is_preferred():
+    from timefit.fitter import is_polite
+
+    assert is_polite("動き出します。") and is_polite("影響を与えました") and not is_polite("動き出す。")
+
+    class Rw:
+        def candidates(self, text, target_chars, previous=None, avoid=None, n=3):
+            # 常体の案のほうが長い（情報が多い）が、元はです・ます調
+            return ["あいうえおかきくけこさしすせ動き出す。", "あいうえおかき動き出します。"]
+
+    original = "あ" * 30 + "動き出します。"
+    r = fit_text(original, 3, 3.5, FakeEngine(), Rw())
+    assert r.ok and r.text == "あいうえおかき動き出します。"
