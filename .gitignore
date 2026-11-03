@@ -9,3 +9,11 @@ venv/
 # 実行時に生成される一時ファイル
 temp.wav
 output.wav
+# ビルド成果物
+build/
+dist/
+release/
+*.spec
+timefit/_build_edition.py
+*_output/
+.pytest_cache/
