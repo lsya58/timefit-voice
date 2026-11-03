@@ -12,7 +12,7 @@ def main() -> int:
         from timefit.cli import main as cli_main
 
         return cli_main()
-    from timefit.gui import main as gui_main
+    from timefit.ui.app import main as gui_main
 
     gui_main()
     return 0

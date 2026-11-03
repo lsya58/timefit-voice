@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>TimeFit Voice</title>
+<style>/*__STYLE__*/</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- 上部バー -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#5AA2FF"/><stop offset="1" stop-color="#7B6CFF"/></linearGradient></defs>
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="url(#lg)"/>
+        <path d="M8 16h2.5M12 11v10M15.5 8.5v15M19 12v8M22.5 14.5v3" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M24.5 9v14" stroke="#fff" stroke-width="1.6" stroke-dasharray="2 2" stroke-linecap="round" opacity=".85"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-name">TimeFit <b>Voice</b></span>
+        <span class="brand-sub">台本を、尺ぴったりの声に。</span>
+      </div>
+      <span id="editionBadge" class="badge"></span>
+    </div>
+    <div class="top-actions">
+      <button id="engineStatus" class="engine-pill" title="音声エンジンの接続状態（クリックで再接続）">
+        <span class="dot"></span><span class="label">接続を確認中…</span>
+      </button>
+      <button id="openSettings" class="icon-btn" title="設定">
+        <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <!-- 左: 操作パネル -->
+    <aside class="side">
+      <div class="side-scroll">
+      <section class="block">
+        <h3>台本</h3>
+        <button id="pickFile" class="file-card empty">
+          <span class="file-icon">
+            <svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>
+          </span>
+          <span class="file-meta">
+            <span id="fileName" class="file-name">ファイルを選ぶ</span>
+            <span id="fileSub" class="file-sub">SRT / VTT / CSV ・ ドラッグ＆ドロップもOK</span>
+          </span>
+        </button>
+      </section>
+
+      <section class="block">
+        <h3>話者</h3>
+        <div class="select-wrap">
+          <select id="speaker"></select>
+        </div>
+        <p class="hint" id="speakerHint">CSV で話者IDを書いた行は、そちらが優先されます</p>
+      </section>
+
+      <section class="block">
+        <h3>合わせ方</h3>
+        <div class="segmented" id="mode">
+          <button data-value="exact" class="on"><b>ぴったり</b><small>足りない分は無音</small></button>
+          <button data-value="within"><b>以内</b><small>短ければそのまま</small></button>
+        </div>
+      </section>
+
+      <section class="block">
+        <h3>話速の上限 <span class="value" id="speedValue">1.30×</span></h3>
+        <input type="range" id="maxSpeed" min="1.0" max="1.6" step="0.05" value="1.3">
+        <div class="range-scale"><span>自然</span><span>早口</span></div>
+      </section>
+
+      <section class="block">
+        <label class="toggle">
+          <input type="checkbox" id="allowRewrite" checked>
+          <span class="track"><span class="thumb"></span></span>
+          <span class="toggle-text"><b>AI で要約して収める</b><small id="rewriteHint">話速の上限でも収まらない行だけ</small></span>
+        </label>
+      </section>
+
+      <section class="block">
+        <h3>出力先</h3>
+        <button id="pickOutput" class="path-btn" title="出力フォルダを変更">
+          <span id="outputPath">台本と同じ場所</span>
+        </button>
+      </section>
+      </div>
+
+      <div class="side-footer">
+        <button id="runBtn" class="primary big" disabled>
+          <svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5L8 5.5Z"/></svg>
+          <span>尺合わせを開始</span>
+        </button>
+        <button id="cancelBtn" class="ghost big hidden">中止する</button>
+        <div class="progress hidden" id="progressWrap">
+          <div class="progress-bar"><span id="progressFill"></span></div>
+          <div class="progress-text" id="progressText"></div>
+        </div>
+        <p class="footnote" id="footnote"></p>
+      </div>
+    </aside>
+
+    <!-- 右: タイムライン -->
+    <main class="main">
+      <div id="emptyState" class="empty-state">
+        <div class="drop-target" id="dropTarget">
+          <svg viewBox="0 0 120 64" class="empty-art" aria-hidden="true">
+            <rect x="4" y="14" width="112" height="14" rx="4" class="slot"/>
+            <rect x="4" y="14" width="78" height="14" rx="4" class="fill a"/>
+            <rect x="4" y="36" width="112" height="14" rx="4" class="slot"/>
+            <rect x="4" y="36" width="112" height="14" rx="4" class="fill b"/>
+            <line x1="116" y1="6" x2="116" y2="58" class="edge"/>
+          </svg>
+          <h2>台本をここにドロップ</h2>
+          <p>字幕ファイル（SRT / VTT）なら、表示時間がそのまま目標の秒数になります。<br>CSV なら「話者ID, 秒数, 原稿」の3列で書いてください。</p>
+          <button class="secondary" id="pickFile2">ファイルを選ぶ</button>
+        </div>
+      </div>
+
+      <div id="timelineView" class="timeline-view hidden">
+        <div class="view-head">
+          <div class="view-title">
+            <h2 id="scriptTitle"></h2>
+            <span id="scriptMeta" class="meta"></span>
+          </div>
+          <div class="view-actions">
+            <button id="playAll" class="secondary hidden">
+              <svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5L8 5.5Z"/></svg>まとめて再生
+            </button>
+            <button id="openOutput" class="secondary hidden">
+              <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>出力フォルダ
+            </button>
+          </div>
+        </div>
+
+        <!-- 全体の時間軸 -->
+        <div class="overview">
+          <div class="overview-track" id="overview"></div>
+          <div class="overview-ruler" id="ruler"></div>
+          <div class="overview-foot">
+            <div class="legend" id="legend"></div>
+            <div id="stats" class="stats"></div>
+          </div>
+        </div>
+
+        <div class="rows-head">
+          <span>#</span><span>開始</span><span></span><span>原稿</span><span>尺（話している部分 / 目標）</span><span>状態</span>
+        </div>
+        <div id="rows" class="rows"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ログ -->
+  <footer class="log" id="log">
+    <button class="log-head" id="logToggle">
+      <span class="chev">▸</span><span>ログ</span><span class="log-last" id="logLast"></span>
+      <span class="log-copy" id="logCopy" title="ログをコピー（お問い合わせ時に貼り付けてください）">コピー</span>
+    </button>
+    <pre class="log-body" id="logBody"></pre>
+  </footer>
+
+  <div id="tooltip" class="tooltip hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+  <audio id="player"></audio>
+
+  <!-- 設定 -->
+  <div class="modal hidden" id="settingsModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>設定</h2>
+        <button class="icon-btn" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <h4>AI 要約（Gemini）</h4>
+        <label class="field">
+          <span>APIキー</span>
+          <input type="password" id="apiKey" placeholder="未設定" autocomplete="off">
+          <small>Google AI Studio で無料で発行できます。
+            <a href="#" data-url="https://aistudio.google.com/apikey">キーを取得する ↗</a></small>
+        </label>
+        <div class="field-row">
+          <label class="field"><span>モデル</span><input id="model"></label>
+          <label class="field"><span>混雑時の予備モデル</span><input id="fallbackModel"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>要約の最大回数</span><input id="rewriteAttempts" type="number" min="0" max="5"></label>
+          <label class="field"><span>句読点の間を詰める下限</span><input id="minPause" type="number" min="0" max="1" step="0.05"></label>
+        </div>
+
+        <h4>音声エンジン</h4>
+        <div class="presets">
+          <button data-engine="http://127.0.0.1:50021" data-credit="VOICEVOX">VOICEVOX</button>
+          <button data-engine="http://127.0.0.1:10101" data-credit="AivisSpeech">AivisSpeech</button>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>URL</span><input id="engineUrl"></label>
+          <label class="field"><span>クレジット表記の頭</span><input id="creditPrefix"></label>
+        </div>
+
+        <h4>動作チェック</h4>
+        <div id="diagResult" class="diag"><p class="hint">VOICEVOX と APIキーが使える状態か確認します。</p></div>
+      </div>
+      <div class="modal-foot">
+        <button class="secondary" id="runDiag">動作チェック</button>
+        <span class="spacer"></span>
+        <button class="ghost" data-close>キャンセル</button>
+        <button class="primary" id="saveSettings">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script>/*__SCRIPT__*/</script>
+</body>
+</html>

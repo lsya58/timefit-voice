@@ -60,46 +60,76 @@ def sanitize_output(raw: str | None) -> str:
 _RETRYABLE = {408, 429, 500, 502, 503, 504}
 
 
+class _ModelUnavailable(Exception):
+    """このモデルは今使えない（混雑・上限・存在しない）。予備モデルに切り替える合図。"""
+
+
 class GeminiRewriter:
-    def __init__(self, api_key: str, model: str, max_retries: int = 3, sleep=time.sleep, client=None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        fallback_models: tuple[str, ...] | list[str] = (),
+        max_retries: int = 2,
+        sleep=time.sleep,
+        client=None,
+        log=lambda _m: None,
+    ):
         if not api_key:
             raise ApiKeyMissingError(
                 "Gemini の APIキーが設定されていません。設定画面で APIキーを入力してください。"
             )
-        self.model = model
+        # 重複や空欄を除いて、使う順に並べる
+        self.models = list(dict.fromkeys(m for m in [model, *fallback_models] if m))
         self.max_retries = max_retries
         self._sleep = sleep
+        self._log = log
         if client is None:
             from google import genai  # 要約を使うときだけ読み込む（起動を速くするため）
 
             client = genai.Client(api_key=api_key)
         self._client = client
 
+    @property
+    def model(self) -> str:
+        return self.models[0]
+
     def rewrite(self, text: str, target_chars: int, previous: str | None = None) -> str:
+        prompt = build_prompt(text, target_chars, previous)
+        reasons = []
+        for i, model in enumerate(self.models):
+            try:
+                return self._call(model, prompt)
+            except _ModelUnavailable as e:
+                reasons.append(f"{model}: {e}")
+                if i + 1 < len(self.models):
+                    self._log(f"     {model} が使えないため、{self.models[i + 1]} に切り替えます（{e}）")
+        raise LLMError(
+            "Gemini が混雑しているか利用上限に達していて、要約できませんでした。"
+            "少し時間をおいて再実行してください。（" + " / ".join(reasons) + "）"
+        )
+
+    def _call(self, model: str, prompt: str) -> str:
         from google.genai import errors, types
 
-        prompt = build_prompt(text, target_chars, previous)
         config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.3)
-
         for attempt in range(self.max_retries + 1):
             try:
-                res = self._client.models.generate_content(model=self.model, contents=prompt, config=config)
+                res = self._client.models.generate_content(model=model, contents=prompt, config=config)
             except errors.APIError as e:
                 if e.code in (401, 403) or (e.code == 400 and "API key" in str(e)):
                     raise ApiKeyInvalidError(
                         "Gemini の APIキーが正しくないか、使えない状態です。設定画面でキーを確認してください。"
                     ) from None
                 if e.code == 404:
-                    raise LLMError(
-                        f"Gemini のモデル「{self.model}」が見つかりません。設定画面でモデル名を確認してください。"
-                    ) from None
-                if e.code in _RETRYABLE and attempt < self.max_retries:
-                    self._sleep(2 ** (attempt + 1))
-                    continue
-                if e.code == 429:
-                    raise LLMError(
-                        "Gemini の利用回数の上限に達しました。しばらく待ってから再実行してください。"
-                    ) from None
+                    raise _ModelUnavailable("モデルが見つかりません") from None
+                if e.code in _RETRYABLE:
+                    if attempt < self.max_retries:
+                        wait = 2 ** (attempt + 1)
+                        self._log(f"     Gemini が混雑しています（{e.code}）。{wait}秒後に再試行します...")
+                        self._sleep(wait)
+                        continue
+                    raise _ModelUnavailable("利用上限" if e.code == 429 else f"混雑（{e.code}）") from None
                 raise LLMError(f"Gemini でエラーが発生しました（{e.code}）: {e.message}") from None
             except Exception as e:  # 通信エラーなど
                 if attempt < self.max_retries:
@@ -111,4 +141,4 @@ class GeminiRewriter:
             if not result:
                 raise LLMError("Gemini から空の結果が返ってきました。")
             return result
-        raise LLMError("Gemini の呼び出しに失敗しました。")  # ここには来ない
+        raise _ModelUnavailable("再試行の上限")  # ここには来ない

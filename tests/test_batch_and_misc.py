@@ -78,6 +78,8 @@ def test_llm_error_on_one_line_does_not_stop_job(tmp_path):
     summary = batch.run_job(src, tmp_path / "o", AppConfig(), engine=FakeEngine(), rewriter=Broken(), log=lambda m: None)
     assert [r.ok for r in summary.results] == [False, True]
     assert "上限" in summary.results[0].message
+    assert "APIキー未設定" not in summary.results[0].message
+    assert "要約に失敗" in summary.results[0].message
 
 
 def test_cancel_stops_early(tmp_path):
@@ -143,6 +145,31 @@ def test_gemini_retries_on_rate_limit():
     rw = GeminiRewriter("key", "m", sleep=sleeps.append, client=_FakeClient(models))
     assert rw.rewrite("元の原稿", 5) == "短くした原稿"
     assert models.calls == 3 and sleeps == [2, 4]
+
+
+def test_gemini_switches_to_fallback_model_when_busy():
+    calls = []
+
+    class Models(_FakeModels):
+        def generate_content(self, **kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "main":
+                raise _api_error(503, "high demand")
+            return super().generate_content(**kwargs)
+
+    logs = []
+    rw = GeminiRewriter("key", "main", fallback_models=["lite"], sleep=lambda s: None,
+                        client=_FakeClient(Models([])), log=logs.append)
+    assert rw.rewrite("元の原稿", 5) == "短くした原稿"
+    assert calls == ["main", "main", "main", "lite"]
+    assert any("lite に切り替え" in m for m in logs)
+
+
+def test_gemini_all_models_busy_raises_llm_error():
+    models = _FakeModels([_api_error(503)] * 6)
+    rw = GeminiRewriter("key", "a", fallback_models=["b"], sleep=lambda s: None, client=_FakeClient(models))
+    with pytest.raises(LLMError, match="混雑"):
+        rw.rewrite("元の原稿", 5)
 
 
 def test_gemini_invalid_key():

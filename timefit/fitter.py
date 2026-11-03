@@ -55,6 +55,7 @@ class FitResult:
     status: FitStatus
     rewrite_attempts: int
     message: str = ""
+    speech_sec: float = 0.0  # 無音を足す前の、実際にしゃべっている部分の長さ
 
     @property
     def duration(self) -> float:
@@ -136,6 +137,7 @@ def fit_text(
     rewriter: Rewriter | None,
     settings: FitSettings | None = None,
     log: Log = lambda _m: None,
+    no_rewrite_reason: str | None = None,
 ) -> FitResult:
     s = settings or FitSettings()
     if target_sec <= 0:
@@ -167,13 +169,17 @@ def fit_text(
                 wav=_finalize(att.wav, target_sec, s),
                 original_text=original, text=current, target_sec=target_sec,
                 speed=att.speed, pause_scale=att.pause_scale, status=status, rewrite_attempts=attempts,
+                speech_sec=min(att.wav.duration, target_sec),
             )
 
         if best is None or att.wav.duration < best[1].wav.duration:
             best = (current, att)
 
         if not s.allow_rewrite or rewriter is None:
-            reason = "要約がオフ" if not s.allow_rewrite else "APIキー未設定のため要約できません"
+            if not s.allow_rewrite:
+                reason = "要約がオフです"
+            else:
+                reason = no_rewrite_reason or "APIキー未設定のため要約できません"
             return _failed(original, best, target_sec, attempts, reason)
         if attempts >= s.max_rewrite_attempts:
             return _failed(original, best, target_sec, attempts, f"{attempts}回要約しても収まりませんでした")
@@ -194,6 +200,6 @@ def _failed(original, best, target_sec, attempts, reason) -> FitResult:
     return FitResult(
         wav=att.wav, original_text=original, text=text, target_sec=target_sec,
         speed=att.speed, pause_scale=att.pause_scale, status=FitStatus.FAILED,
-        rewrite_attempts=attempts,
+        rewrite_attempts=attempts, speech_sec=att.wav.duration,
         message=f"{reason}。目標より {over:.2f}秒 長いです（原稿を短くしてください）",
     )

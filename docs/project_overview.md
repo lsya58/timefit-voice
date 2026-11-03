@@ -39,13 +39,14 @@
   - Python 3.12
   - `google-genai` (Gemini API公式SDK)
   - `requests` (VOICEVOX HTTP API通信用)
-  - `Tkinter` (GUI。標準ライブラリなので exe が小さく済む)
+  - `pywebview` (GUI。HTML/CSS で画面を描き、Windows 標準の Edge WebView2 で表示する。exe はほぼ大きくならない)
   - `PyInstaller` (.exe化用)、`pytest` (テスト)
 * **コード構成** (`timefit/`):
   - `fitter.py` 尺合わせの判断（間を詰める → 話速 → 要約）。通信しないのでテストしやすい
   - `engine.py` VOICEVOX 通信と `audio_query` からの長さ見積もり / `llm.py` Gemini 要約
   - `audio.py` WAV のメモリ上処理 / `inputs.py` CSV・SRT・VTT / `outputs.py` 書き出し
-  - `batch.py` 一括処理（CLI・GUI 共通）/ `cli.py` / `gui.py` / `config.py` / `edition.py`（無料版・製品版）
+  - `batch.py` 一括処理（CLI・GUI 共通）/ `cli.py` / `config.py` / `edition.py`（無料版・製品版）
+  - `ui/app.py` 画面と Python の橋渡し / `ui/web/` 画面の HTML・CSS・JS（ダークテーマ、タイムライン表示）
   - `main.py` 引数なしで GUI、引数ありで CLI
 * **テスト**: `tests/` は VOICEVOX と Gemini を偽物に差し替えて動くので、WSL 上で `python -m pytest` できる（実機の確認は Windows 側で行う）。
 * **配布物のビルド**: Windows で `.\scripts\build.ps1 -Edition pro`（または `free`）。

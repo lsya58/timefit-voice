@@ -13,6 +13,8 @@ from .fitter import FitMode, FitSettings
 class AppConfig:
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
+    # 混雑・利用上限のときに切り替える予備モデル（カンマ区切りで複数可）
+    gemini_fallback_model: str = "gemini-flash-lite-latest"
     engine_url: str = "http://127.0.0.1:50021"
     credit_prefix: str = "VOICEVOX"
     default_speaker: int = 3

@@ -10,12 +10,13 @@ from .config import AppConfig
 from .engine import VoicevoxClient
 from .errors import EngineError, LLMError
 from .fitter import FitResult, FitStatus, fit_text
-from .inputs import load_script
+from .inputs import ScriptLine, load_script
 from .llm import GeminiRewriter, Rewriter
 from .outputs import credit_text, wav_filename, write_combined_wav, write_report, write_srt
 
 Log = Callable[[str], None]
-Progress = Callable[[int, int, FitResult], None]
+LineStart = Callable[[int, int, ScriptLine], None]
+Progress = Callable[[int, int, ScriptLine, FitResult, str], None]  # (何行目, 全行数, 行, 結果, WAVファイル名)
 
 
 @dataclass
@@ -42,7 +43,8 @@ def make_rewriter(cfg: AppConfig, log: Log) -> Rewriter | None:
     if not cfg.gemini_api_key:
         log("※ Gemini の APIキーが未設定のため、要約は行いません（話速の調整だけで合わせます）。")
         return None
-    return GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model)
+    fallbacks = [m.strip() for m in cfg.gemini_fallback_model.split(",")]
+    return GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, fallback_models=fallbacks, log=log)
 
 
 def run_job(
@@ -53,6 +55,7 @@ def run_job(
     rewriter: Rewriter | None = None,
     log: Log = print,
     on_progress: Progress | None = None,
+    on_line_start: LineStart | None = None,
     cancel: threading.Event | None = None,
 ) -> JobSummary:
     """入力ファイルを読み、1行ずつ尺合わせして、出力フォルダに結果をまとめて書き出す"""
@@ -84,25 +87,34 @@ def run_job(
             log("中止しました。ここまでの結果を書き出します。")
             break
         speaker = line.speaker_id if line.speaker_id is not None else cfg.default_speaker
+        if on_line_start:
+            on_line_start(i, len(lines), line)
         log(f"[{i}/{len(lines)}] 目標 {line.target_sec:.2f}秒: {line.text}")
+        llm_error = None
         try:
             result = fit_text(line.text, speaker, line.target_sec, engine, rewriter, settings, log)
         except LLMError as e:
             # 要約だけ失敗した行は、要約なしでできるところまで合わせる
             # （APIキーの誤りは LLMError ではないので、ここでは捕まえず全体を止める）
-            log(f"  ⚠ {e} この行は要約なしで処理します。")
-            result = fit_text(line.text, speaker, line.target_sec, engine, None, settings, log)
-            result.message = f"{e} {result.message}".strip()
+            llm_error = e
+            log(f"  ⚠ {e}")
+            log("  この行は要約なしで、できるところまで合わせます。")
+            result = fit_text(
+                line.text, speaker, line.target_sec, engine, None, settings, log,
+                no_rewrite_reason="AI の要約に失敗しました",
+            )
 
         name = wav_filename(line, result)
         (out / name).write_bytes(result.wav.to_bytes())
         if not result.ok:
             log(f"  ⚠ {result.message}")
+        if llm_error is not None:
+            result.message = f"{result.message or 'AI の要約に失敗しました'}（詳細: {llm_error}）"
         summary.results.append(result)
         files.append(name)
         done_lines.append(line)
         if on_progress:
-            on_progress(i, len(lines), result)
+            on_progress(i, len(lines), line, result, name)
 
     if summary.results:
         _write_extras(out, script.kind, done_lines, summary.results, files, cfg, engine, log)

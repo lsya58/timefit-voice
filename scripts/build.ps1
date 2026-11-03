@@ -28,6 +28,7 @@ try {
     pyinstaller --noconfirm --clean --onefile --windowed `
         --name $name `
         --collect-submodules google.genai `
+        --add-data "timefit\ui\web;timefit\ui\web" `
         main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller が失敗しました" }
 }
