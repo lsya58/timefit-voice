@@ -8,8 +8,9 @@ from typing import Callable
 from . import edition
 from .config import AppConfig
 from .engine import VoicevoxClient
-from .errors import EngineError, LLMError
-from .fitter import FitResult, FitStatus, fit_text
+from .errors import ApiKeyMissingError, EngineError, LLMError, TimeFitError
+from .fitter import FitResult, FitStatus, fit_text, plan_prosody, rewrite_target_chars
+from .engine import estimate_duration, with_prosody
 from .inputs import ScriptLine, load_script
 from .llm import GeminiRewriter, Rewriter
 from .outputs import credit_text, wav_filename, write_combined_wav, write_report, write_srt
@@ -21,10 +22,23 @@ Progress = Callable[[int, int, ScriptLine, FitResult, str], None]  # (何行目,
 
 @dataclass
 class JobSummary:
+    """1回の処理の結果。あとから1行だけ作り直すときにも使う。"""
+
     output_dir: Path
+    kind: str = "csv"
+    lines: list[ScriptLine] = field(default_factory=list)    # 処理した行（results と同じ順）
     results: list[FitResult] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+    speakers: list[int] = field(default_factory=list)
+    approved: set[int] = field(default_factory=set)          # 要約を確認済みの行番号
     skipped_by_limit: int = 0
     cancelled: bool = False
+
+    def position(self, index: int) -> int:
+        for pos, ln in enumerate(self.lines):
+            if ln.index == index:
+                return pos
+        raise TimeFitError(f"{index}行目の結果が見つかりません。")
 
     @property
     def failed(self) -> int:
@@ -68,7 +82,7 @@ def run_job(
     if rewriter is None:
         rewriter = make_rewriter(cfg, log)
 
-    summary = JobSummary(output_dir=Path(output_dir))
+    summary = JobSummary(output_dir=Path(output_dir), kind=script.kind)
     limit = edition.line_limit()
     if limit is not None and len(lines) > limit:
         summary.skipped_by_limit = len(lines) - limit
@@ -78,8 +92,6 @@ def run_job(
     out = summary.output_dir
     out.mkdir(parents=True, exist_ok=True)
     settings = cfg.fit_settings()
-    files: list[str] = []
-    done_lines = []
 
     for i, line in enumerate(lines, start=1):
         if cancel is not None and cancel.is_set():
@@ -111,28 +123,31 @@ def run_job(
         if llm_error is not None:
             result.message = f"{result.message or 'AI の要約に失敗しました'}（詳細: {llm_error}）"
         summary.results.append(result)
-        files.append(name)
-        done_lines.append(line)
+        summary.files.append(name)
+        summary.lines.append(line)
+        summary.speakers.append(speaker)
         if on_progress:
             on_progress(i, len(lines), line, result, name)
 
     if summary.results:
-        _write_extras(out, script.kind, done_lines, summary.results, files, cfg, engine, log)
+        write_outputs(summary, cfg, engine, log)
     c = summary.counts()
     log("完了: " + "、".join(f"{k} {v}件" for k, v in c.items() if v))
     log(f"出力先: {out}")
     return summary
 
 
-def _write_extras(out, kind, lines, results, files, cfg, engine, log) -> None:
-    write_report(out / "report.csv", lines, results, files)
+def write_outputs(summary: JobSummary, cfg: AppConfig, engine, log: Log) -> None:
+    """行ごとの WAV 以外の出力（レポート・字幕・まとめ音声・クレジット）を書き出す"""
+    out, kind, lines, results = summary.output_dir, summary.kind, summary.lines, summary.results
+    write_report(out / "report.csv", lines, results, summary.files)
     write_srt(out / "fitted.srt", lines, results)
     try:
         write_combined_wav(out / "combined.wav", lines, results)
     except ValueError as e:
         log(f"※ まとめWAVは作れませんでした: {e}")
 
-    speaker_ids = {ln.speaker_id if ln.speaker_id is not None else cfg.default_speaker for ln in lines}
+    speaker_ids = set(summary.speakers)
     try:
         styles = {s.style_id: s.character for s in engine.speakers()}
         names = [styles.get(sid, f"話者ID {sid}") for sid in speaker_ids]
@@ -141,3 +156,75 @@ def _write_extras(out, kind, lines, results, files, cfg, engine, log) -> None:
     (out / "credits.txt").write_text(credit_text(cfg.credit_prefix, names), encoding="utf-8")
     note = "字幕のタイミングどおり" if kind == "srt" else "行の順に隙間なく"
     log(f"まとめ音声 combined.wav（{note}）、字幕 fitted.srt、結果一覧 report.csv、クレジット credits.txt を書き出しました。")
+
+
+# ---------- あとから1行だけ直す（要約の確認画面から使う） ----------
+
+def refit_line(
+    summary: JobSummary, index: int, text: str, cfg: AppConfig, engine=None, log: Log = print,
+) -> FitResult:
+    """ユーザーが選んだ／書いた文で1行だけ作り直し、出力ファイルも更新する。AI には送らない。"""
+    text = text.strip()
+    if not text:
+        raise TimeFitError("原稿が空です。")
+    pos = summary.position(index)
+    line, old = summary.lines[pos], summary.results[pos]
+    engine = engine or VoicevoxClient(cfg.engine_url)
+    settings = cfg.fit_settings()
+    settings.allow_rewrite = True  # rewriter を渡さないので要約はしない。失敗理由の文言のため
+    log(f"[{index}行目を作り直し] {text}")
+    result = fit_text(
+        text, summary.speakers[pos], line.target_sec, engine, None, settings, log,
+        no_rewrite_reason="この文では長すぎます", original=old.original_text,
+    )
+    result.candidates = list(old.candidates)
+
+    out = summary.output_dir
+    name = wav_filename(line, result)
+    if summary.files[pos] != name:
+        (out / summary.files[pos]).unlink(missing_ok=True)
+    (out / name).write_bytes(result.wav.to_bytes())
+    summary.results[pos] = result
+    summary.files[pos] = name
+    summary.approved.add(index)
+    write_outputs(summary, cfg, engine, log)
+    return result
+
+
+def suggest_candidates(summary: JobSummary, index: int, cfg: AppConfig, engine=None, log: Log = print) -> list[str]:
+    """AI に別の案を出してもらい、これまでの案に足して返す"""
+    if not cfg.gemini_api_key:
+        raise ApiKeyMissingError("AI に案を出してもらうには、設定で Gemini の APIキーを登録してください。")
+    pos = summary.position(index)
+    line, old = summary.lines[pos], summary.results[pos]
+    engine = engine or VoicevoxClient(cfg.engine_url)
+    fallbacks = [m.strip() for m in cfg.gemini_fallback_model.split(",")]
+    rewriter = GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, fallback_models=fallbacks, log=log)
+    return add_candidates(old, rewriter, engine, summary.speakers[pos], line.target_sec, cfg)
+
+
+def add_candidates(result: FitResult, rewriter: Rewriter, engine, speaker: int, target_sec: float, cfg: AppConfig) -> list[str]:
+    settings = cfg.fit_settings()
+    query = engine.audio_query(result.original_text, speaker)
+    target_chars = rewrite_target_chars(result.original_text, query, target_sec, settings)
+    avoid = result.candidates[-6:] or None
+    new = rewriter.candidates(result.original_text, target_chars, avoid=avoid, n=settings.candidate_count)
+    for c in new:
+        if c not in result.candidates and c != result.original_text:
+            result.candidates.append(c)
+    return result.candidates
+
+
+def estimate_text(text: str, speaker: int, target_sec: float, cfg: AppConfig, engine=None) -> dict:
+    """合成せずに、その文がどのくらいの長さになり、収まるかを見積もる（入力中のプレビュー用）"""
+    engine = engine or VoicevoxClient(cfg.engine_url, timeout=10)
+    query = engine.audio_query(text, speaker)
+    natural = estimate_duration(with_prosody(query, 1.0, 1.0))
+    plan = plan_prosody(query, target_sec, cfg.fit_settings())
+    return {
+        "natural": natural,
+        "fits": plan is not None,
+        "pause": plan[0] if plan else None,
+        "speed": plan[1] if plan else None,
+        "chars": len(text),
+    }

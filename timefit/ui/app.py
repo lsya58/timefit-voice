@@ -17,7 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .. import APP_NAME, __version__, edition
-from ..batch import run_job
+from ..batch import JobSummary, estimate_text, refit_line, run_job, suggest_candidates
 from ..config import AppConfig, load_config, save_config
 from ..diagnose import diagnose
 from ..engine import VoicevoxClient
@@ -43,7 +43,13 @@ def _line_dict(line: ScriptLine, default_speaker: int) -> dict:
     }
 
 
-def _result_dict(index: int, r: FitResult, filename: str) -> dict:
+def sample_path() -> Path:
+    """同梱のサンプル字幕。exe では展開先（_MEIPASS）、開発中はリポジトリ直下の samples/"""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+    return base / "samples" / "sample.srt"
+
+
+def _result_dict(index: int, r: FitResult, filename: str, approved: bool = False) -> dict:
     return {
         "index": index,
         "status": r.status.value,
@@ -56,7 +62,9 @@ def _result_dict(index: int, r: FitResult, filename: str) -> dict:
         "pause": r.pause_scale,
         "text": r.text,
         "original": r.original_text,
-        "rewritten": r.rewrite_attempts > 0,
+        "rewritten": r.rewritten,
+        "candidates": list(r.candidates),
+        "approved": approved,
         "message": r.message,
         "file": filename,
     }
@@ -68,6 +76,7 @@ class Api:
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
         self._results: dict[int, FitResult] = {}
+        self._summary: JobSummary | None = None
         self._output_dir: Path | None = None
         self._config_error = None
         try:
@@ -169,6 +178,12 @@ class Api:
             "lines": [_line_dict(ln, self._cfg.default_speaker) for ln in script.lines],
         }
 
+    def sample(self) -> dict:
+        path = sample_path()
+        if not path.exists():
+            return {"ok": False, "error": f"サンプルが見つかりません: {path}"}
+        return self.preview(str(path))
+
     def _on_drop(self, event):
         files = (event.get("dataTransfer") or {}).get("files") or []
         path = next((f.get("pywebviewFullPath") for f in files if f.get("pywebviewFullPath")), None)
@@ -191,6 +206,7 @@ class Api:
 
         self._cancel.clear()
         self._results.clear()
+        self._summary = None
         self._output_dir = Path(output)
         self._worker = threading.Thread(target=self._work, args=(input_path, output), daemon=True)
         self._worker.start()
@@ -205,6 +221,7 @@ class Api:
                 on_progress=self._on_progress,
                 cancel=self._cancel,
             )
+            self._summary = summary
             self._emit("done", summary={
                 "count": len(summary.results),
                 "failed": summary.failed,
@@ -224,6 +241,64 @@ class Api:
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    # ---------- 要約の確認・作り直し ----------
+    def _busy(self) -> bool:
+        return bool(self._worker and self._worker.is_alive())
+
+    def _summary_or_error(self):
+        if self._busy():
+            return None, {"ok": False, "error": "処理中です。終わってから操作してください。"}
+        if self._summary is None:
+            return None, {"ok": False, "error": "先に「尺合わせを開始」で処理してください。"}
+        return self._summary, None
+
+    def suggest(self, index: int) -> dict:
+        """AI に別の案を出してもらう"""
+        summary, err = self._summary_or_error()
+        if err:
+            return err
+        try:
+            cands = suggest_candidates(summary, int(index), self._cfg, log=lambda m: self._emit("log", message=m))
+        except TimeFitError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "candidates": cands}
+
+    def estimate(self, index: int, text: str) -> dict:
+        """入力中の文が、目標に収まりそうかを見積もる（合成はしない）"""
+        summary, err = self._summary_or_error()
+        if err:
+            return err
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "原稿が空です。"}
+        try:
+            pos = summary.position(int(index))
+            est = estimate_text(text, summary.speakers[pos], summary.lines[pos].target_sec, self._cfg)
+        except TimeFitError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **est}
+
+    def apply(self, index: int, text: str) -> dict:
+        """選んだ／書いた文で1行だけ作り直す"""
+        summary, err = self._summary_or_error()
+        if err:
+            return err
+        index = int(index)
+        try:
+            result = refit_line(summary, index, text, self._cfg, log=lambda m: self._emit("log", message=m))
+        except TimeFitError as e:
+            return {"ok": False, "error": str(e)}
+        self._results[index] = result
+        pos = summary.position(index)
+        return {"ok": True, "result": _result_dict(index, result, summary.files[pos], True)}
+
+    def approve(self, index: int) -> dict:
+        summary, err = self._summary_or_error()
+        if err:
+            return err
+        summary.approved.add(int(index))
+        return {"ok": True}
 
     def audio(self, index: int) -> str | None:
         """1行分の音声を data URL で返す（画面で試聴するため）"""

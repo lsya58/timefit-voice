@@ -1,5 +1,6 @@
 """台本の要約（リライト）"""
 
+import json
 import re
 import time
 from typing import Protocol
@@ -8,8 +9,13 @@ from .errors import ApiKeyInvalidError, ApiKeyMissingError, LLMError
 
 
 class Rewriter(Protocol):
-    def rewrite(self, text: str, target_chars: int, previous: str | None = None) -> str:
-        """text を target_chars 文字前後に要約して返す。previous は前回の長すぎた案。"""
+    def candidates(
+        self, text: str, target_chars: int, previous: str | None = None, avoid: list[str] | None = None, n: int = 3,
+    ) -> list[str]:
+        """text を target_chars 文字以内に要約した案を n 個返す（重複なし・1個以上）。
+
+        previous は前回の長すぎた案、avoid は「これとは違う言い回しにしてほしい」案。
+        """
         ...
 
 
@@ -19,18 +25,63 @@ SYSTEM_PROMPT = (
     "- 元の意味・主張・重要な固有名詞・数字は残す\n"
     "- 新しい情報を足さない\n"
     "- 自然な話し言葉の日本語にする\n"
-    "- 出力は書き換えた原稿の本文だけ。説明・前置き・かぎ括弧・改行・記号の装飾は付けない"
+    "- 各案は原稿の本文だけ。説明・前置き・かぎ括弧・改行・記号の装飾は付けない"
 )
 
+# 案ごとの方針（n 個目までを使う）
+CANDIDATE_STYLES = [
+    "重要な情報（固有名詞・数字・事実）をできるだけ多く残す",
+    "話し言葉として自然に聞こえることを優先する",
+    "要点だけに絞って、さらに短くする（目安の8割ほど）",
+    "語順や言い回しを大きく変えて、テンポよく聞こえるようにする",
+]
 
-def build_prompt(text: str, target_chars: int, previous: str | None) -> str:
-    prompt = f"次の原稿を{target_chars}文字以内に短くしてください。\n\n【原稿】\n{text}"
+
+def build_prompt(
+    text: str, target_chars: int, previous: str | None, avoid: list[str] | None = None, n: int = 3,
+) -> str:
+    styles = "\n".join(f"- 案{i + 1}: {CANDIDATE_STYLES[i % len(CANDIDATE_STYLES)]}" for i in range(n))
+    prompt = (
+        f"次の原稿を{target_chars}文字以内に短くした案を{n}個作ってください。\n"
+        f"{styles}\n"
+        f"出力は JSON の文字列配列だけにしてください（例: [\"案1\", \"案2\"]）。\n\n"
+        f"【原稿】\n{text}"
+    )
     if previous:
         prompt += (
             f"\n\n【前回の案（{len(previous)}文字）】\n{previous}\n"
             f"前回の案はまだ長すぎました。必ず{target_chars}文字以内にしてください。"
         )
+    if avoid:
+        joined = "\n".join(f"- {a}" for a in avoid)
+        prompt += f"\n\n【すでに出した案】\n{joined}\nこれらとは違う言い回しにしてください。"
     return prompt
+
+
+def parse_candidates(raw: str | None) -> list[str]:
+    """LLM の出力（JSON 配列のはず）を案のリストにする。JSON でなければ全体を1案として扱う。"""
+    if not raw:
+        return []
+    text = re.sub(r"^```[^\n]*\n?|```$", "", raw.strip()).strip()
+    items: list[str]
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):  # {"candidates": [...]} のように包まれていた場合
+            data = next((v for v in data.values() if isinstance(v, list)), list(data.values()))
+        if isinstance(data, str):
+            items = [data]
+        elif isinstance(data, list):
+            items = [str(d.get("text", "")) if isinstance(d, dict) else str(d) for d in data]
+        else:
+            items = [text]
+    except (json.JSONDecodeError, AttributeError):
+        items = [text]
+    out: list[str] = []
+    for item in items:
+        cleaned = sanitize_output(item)
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
 
 
 _LABEL_RE = re.compile(r"^(要約|リライト後?|書き換え後?|短縮版|出力|回答|原稿)\s*[:：]\s*")
@@ -94,8 +145,10 @@ class GeminiRewriter:
     def model(self) -> str:
         return self.models[0]
 
-    def rewrite(self, text: str, target_chars: int, previous: str | None = None) -> str:
-        prompt = build_prompt(text, target_chars, previous)
+    def candidates(
+        self, text: str, target_chars: int, previous: str | None = None, avoid: list[str] | None = None, n: int = 3,
+    ) -> list[str]:
+        prompt = build_prompt(text, target_chars, previous, avoid, n)
         reasons = []
         for i, model in enumerate(self.models):
             try:
@@ -109,10 +162,12 @@ class GeminiRewriter:
             "少し時間をおいて再実行してください。（" + " / ".join(reasons) + "）"
         )
 
-    def _call(self, model: str, prompt: str) -> str:
+    def _call(self, model: str, prompt: str) -> list[str]:
         from google.genai import errors, types
 
-        config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, temperature=0.3)
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT, temperature=0.5, response_mime_type="application/json",
+        )
         for attempt in range(self.max_retries + 1):
             try:
                 res = self._client.models.generate_content(model=model, contents=prompt, config=config)
@@ -137,7 +192,7 @@ class GeminiRewriter:
                     continue
                 raise LLMError(f"Gemini に接続できませんでした。ネット接続を確認してください。（{e}）") from None
 
-            result = sanitize_output(res.text)
+            result = parse_candidates(res.text)
             if not result:
                 raise LLMError("Gemini から空の結果が返ってきました。")
             return result

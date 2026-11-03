@@ -116,7 +116,10 @@
           </svg>
           <h2>台本をここにドロップ</h2>
           <p>字幕ファイル（SRT / VTT）なら、表示時間がそのまま目標の秒数になります。<br>CSV なら「話者ID, 秒数, 原稿」の3列で書いてください。</p>
-          <button class="secondary" id="pickFile2">ファイルを選ぶ</button>
+          <div class="empty-actions">
+            <button class="secondary" id="pickFile2">ファイルを選ぶ</button>
+            <button class="ghost" id="trySample">サンプル字幕で試す</button>
+          </div>
         </div>
       </div>
 
@@ -166,6 +169,40 @@
   <div id="tooltip" class="tooltip hidden"></div>
   <div id="toast" class="toast hidden"></div>
   <audio id="player"></audio>
+
+  <!-- 原稿の確認・選び直し -->
+  <div class="modal hidden" id="reviewModal">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <div>
+          <h2 id="rvTitle"></h2>
+          <span class="meta" id="rvMeta"></span>
+        </div>
+        <button class="icon-btn" data-close-review>✕</button>
+      </div>
+      <div class="modal-body">
+        <h4>元の原稿 <span class="h4-note">赤い部分が、選んでいる文では削られています</span></h4>
+        <div class="orig-box" id="rvOriginal"></div>
+        <div class="lost hidden" id="rvLost"></div>
+
+        <h4>候補 <span class="h4-note">クリックで選ぶと、下の欄に入ります</span></h4>
+        <div class="cands" id="rvCands"></div>
+        <button class="ghost add-cand" id="rvMore">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>AI に別の案を出してもらう</span>
+        </button>
+
+        <h4>この文で作る <span class="h4-note">自由に書き直せます</span></h4>
+        <textarea id="rvText" rows="3"></textarea>
+        <div class="est" id="rvEst"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="ghost" id="rvUseOriginal">元の原稿に戻す</button>
+        <span class="spacer"></span>
+        <button class="ghost" data-close-review>キャンセル</button>
+        <button class="primary" id="rvApply">この文で作り直す</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 設定 -->
   <div class="modal hidden" id="settingsModal">

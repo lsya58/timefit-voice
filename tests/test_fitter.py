@@ -68,7 +68,11 @@ def test_rewrite_when_too_long():
     assert len(r.text) < len(text)
     assert r.speed <= 1.3
     assert r.wav.n_frames == frames(3.0)
-    assert rewriter.calls[0][0] == text  # 要約は必ず元の原稿から
+    assert rewriter.calls[0]["text"] == text  # 要約は必ず元の原稿から
+    assert r.rewritten
+    # 収まる案のうち、一番情報が多い（長い）案が選ばれ、ほかの案も確認用に残る
+    assert r.text == text[:rewriter.calls[-1]["target_chars"]]
+    assert len(r.candidates) == 3 and r.text in r.candidates
 
 
 def test_without_rewriter_reports_failure_with_best_effort_audio():
@@ -85,7 +89,7 @@ def test_rewriter_that_never_shortens_stops_after_max_attempts():
     r = fit_text("あ" * 40, 3, 3.0, FakeEngine(), rewriter, FitSettings(max_rewrite_attempts=2))
     assert r.status == FitStatus.FAILED
     assert len(rewriter.calls) == 2
-    assert rewriter.calls[1][2] is not None  # 2回目は前回案を渡して、さらに短くさせる
+    assert rewriter.calls[1]["previous"] is not None  # 2回目は前回案を渡して、さらに短くさせる
 
 
 def test_speed_never_exceeds_limit():
@@ -93,6 +97,18 @@ def test_speed_never_exceeds_limit():
     r = fit_text("あ" * 12, 3, 1.75, engine, FakeRewriter(), FitSettings(max_speed=1.25))
     assert all(q["speedScale"] <= 1.25 + 1e-9 for q in engine.synth_calls)
     assert r.speed <= 1.25 + 1e-9
+
+
+def test_refit_with_user_text_keeps_original():
+    original = "あ" * 40
+    r = fit_text("い" * 15, 3, 3.0, FakeEngine(), None, original=original)
+    assert r.ok and r.status == FitStatus.REWRITE
+    assert r.original_text == original and r.text == "い" * 15
+
+
+def test_user_text_that_is_too_long_fails_without_rewriting():
+    r = fit_text("い" * 40, 3, 3.0, FakeEngine(), None, FitSettings(allow_rewrite=False), original="あ" * 40)
+    assert r.status == FitStatus.FAILED and r.text == "い" * 40
 
 
 def test_output_is_valid_wav():

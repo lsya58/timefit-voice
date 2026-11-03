@@ -28,7 +28,7 @@ def diagnose(cfg: AppConfig, engine: VoicevoxClient | None = None, check_llm: bo
         items.append(CheckItem(False, "Gemini の APIキーが未設定です（要約が必要な行は収まらない可能性があります）"))
     elif check_llm:
         try:
-            GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, max_retries=0).rewrite("これは接続テストです。", 5)
+            GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, max_retries=0).candidates("これは接続テストです。", 5, n=1)
             items.append(CheckItem(True, f"Gemini に接続できました（モデル {cfg.gemini_model}）"))
         except TimeFitError as e:
             items.append(CheckItem(False, str(e)))

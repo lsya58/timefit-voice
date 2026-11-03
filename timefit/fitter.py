@@ -8,7 +8,7 @@
 最後に、足りない分は無音を足し、わずかなはみ出しは末尾の無音を削って、目標の長さちょうどにする。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
@@ -42,6 +42,7 @@ class FitSettings:
     allow_rewrite: bool = True
     # 要約の目標: 等倍でこの割合の長さになるよう文字数を決める（少し余裕を持たせる）
     rewrite_target_ratio: float = 0.95
+    candidate_count: int = 3  # 1回の要約で AI に出してもらう案の数
 
 
 @dataclass
@@ -56,6 +57,7 @@ class FitResult:
     rewrite_attempts: int
     message: str = ""
     speech_sec: float = 0.0  # 無音を足す前の、実際にしゃべっている部分の長さ
+    candidates: list[str] = field(default_factory=list)  # AI が出した案（採用したものも含む）
 
     @property
     def duration(self) -> float:
@@ -64,6 +66,10 @@ class FitResult:
     @property
     def ok(self) -> bool:
         return self.status != FitStatus.FAILED
+
+    @property
+    def rewritten(self) -> bool:
+        return self.text != self.original_text
 
 
 @dataclass
@@ -129,6 +135,30 @@ def _status_for(attempt: _Attempt, rewritten: bool) -> FitStatus:
     return FitStatus.NATURAL
 
 
+def rewrite_target_chars(text: str, query: dict, target_sec: float, s: FitSettings) -> int:
+    """等倍で目標の尺（の rewrite_target_ratio 倍）になる文字数の目安"""
+    natural = estimate_duration(with_prosody(query, 1.0, 1.0))
+    ratio = target_sec * s.rewrite_target_ratio / natural if natural > 0 else 1.0
+    return max(5, int(len(text) * ratio))
+
+
+@dataclass
+class _Candidate:
+    text: str
+    query: dict
+    natural: float               # 等倍での見積もり秒数
+    plan: tuple[float, float] | None
+
+
+def _evaluate(engine, texts: list[str], speaker, target_sec, s) -> list[_Candidate]:
+    out = []
+    for t in texts:
+        q = engine.audio_query(t, speaker)
+        out.append(_Candidate(t, q, estimate_duration(with_prosody(q, 1.0, 1.0)), plan_prosody(q, target_sec, s)))
+    # 収まる案を先に、その中では情報が多い（長い）順に試す
+    return sorted(out, key=lambda c: (c.plan is None, -c.natural))
+
+
 def fit_text(
     text: str,
     speaker: int,
@@ -138,68 +168,71 @@ def fit_text(
     settings: FitSettings | None = None,
     log: Log = lambda _m: None,
     no_rewrite_reason: str | None = None,
+    original: str | None = None,
 ) -> FitResult:
+    """text を target_sec に合わせる。
+
+    original を渡すと「元の原稿」として扱う（ユーザーが選び直した文で作り直すとき用）。
+    """
     s = settings or FitSettings()
     if target_sec <= 0:
         raise ValueError("目標秒数は 0 より大きくしてください")
 
-    original = text.strip()
-    current = original
+    original = (original or text).strip()
+    pending = [text.strip()]
+    suggestions: list[str] = []   # AI が出した案（確認画面で選び直せるように全部残す）
     attempts = 0
-    best: tuple[str, _Attempt] | None = None  # 収まらなかった中で一番短いもの
+    shortest: _Candidate | None = None
 
     while True:
-        query = engine.audio_query(current, speaker)
-        plan = plan_prosody(query, target_sec, s)
-        if plan is not None:
-            pause_scale, speed = plan
-            att = _synthesize_to_fit(engine, query, speaker, target_sec, pause_scale, speed, s)
-        else:
-            # 上限まで詰めた状態で作っておく（最終的に収まらなかったときに使う）
-            min_pause = s.min_pause_scale if supports_pause_scale(query) else 1.0
-            att = _Attempt(
-                parse_wav(engine.synthesis(with_prosody(query, s.max_speed, min_pause), speaker)),
-                s.max_speed, min_pause, False,
-            )
-
-        if att.fits:
-            status = _status_for(att, attempts > 0)
-            log(f"  → {status.value}（話速 {att.speed:.2f}倍、間 {att.pause_scale:.2f}倍）")
-            return FitResult(
-                wav=_finalize(att.wav, target_sec, s),
-                original_text=original, text=current, target_sec=target_sec,
-                speed=att.speed, pause_scale=att.pause_scale, status=status, rewrite_attempts=attempts,
-                speech_sec=min(att.wav.duration, target_sec),
-            )
-
-        if best is None or att.wav.duration < best[1].wav.duration:
-            best = (current, att)
+        for cand in _evaluate(engine, pending, speaker, target_sec, s):
+            if shortest is None or cand.natural < shortest.natural:
+                shortest = cand
+            if cand.plan is None:
+                continue
+            att = _synthesize_to_fit(engine, cand.query, speaker, target_sec, *cand.plan, s)
+            if att.fits:
+                status = _status_for(att, cand.text != original)
+                log(f"  → {status.value}（話速 {att.speed:.2f}倍、間 {att.pause_scale:.2f}倍）")
+                return FitResult(
+                    wav=_finalize(att.wav, target_sec, s),
+                    original_text=original, text=cand.text, target_sec=target_sec,
+                    speed=att.speed, pause_scale=att.pause_scale, status=status, rewrite_attempts=attempts,
+                    speech_sec=min(att.wav.duration, target_sec), candidates=suggestions,
+                )
 
         if not s.allow_rewrite or rewriter is None:
             if not s.allow_rewrite:
                 reason = "要約がオフです"
             else:
                 reason = no_rewrite_reason or "APIキー未設定のため要約できません"
-            return _failed(original, best, target_sec, attempts, reason)
+            return _failed(engine, speaker, original, shortest, target_sec, attempts, reason, suggestions, s)
         if attempts >= s.max_rewrite_attempts:
-            return _failed(original, best, target_sec, attempts, f"{attempts}回要約しても収まりませんでした")
+            reason = f"{attempts}回要約しても収まりませんでした"
+            return _failed(engine, speaker, original, shortest, target_sec, attempts, reason, suggestions, s)
 
         attempts += 1
-        natural = estimate_duration(with_prosody(query, 1.0, 1.0))
-        ratio = target_sec * s.rewrite_target_ratio / natural
-        target_chars = max(5, int(len(current) * ratio))
+        target_chars = rewrite_target_chars(shortest.text, shortest.query, target_sec, s)
         log(f"  → 話速{s.max_speed}倍でも収まらないため要約します（{attempts}回目、目標 {target_chars}文字）")
-        previous = current if attempts > 1 else None
-        current = rewriter.rewrite(original, target_chars, previous)
-        log(f"     要約結果: {current}")
+        previous = shortest.text if shortest.text != original else None
+        pending = [c for c in rewriter.candidates(original, target_chars, previous, n=s.candidate_count)
+                   if c not in suggestions]
+        if not pending:
+            return _failed(engine, speaker, original, shortest, target_sec, attempts,
+                           "AI が新しい案を出せませんでした", suggestions, s)
+        suggestions.extend(pending)
+        for i, c in enumerate(pending, start=1):
+            log(f"     案{i}: {c}")
 
 
-def _failed(original, best, target_sec, attempts, reason) -> FitResult:
-    text, att = best
-    over = att.wav.duration - target_sec
+def _failed(engine, speaker, original, shortest: _Candidate, target_sec, attempts, reason, suggestions, s) -> FitResult:
+    """収まらなかったときは、一番短い文を上限まで詰めて作る（削って意味を壊すことはしない）"""
+    min_pause = s.min_pause_scale if supports_pause_scale(shortest.query) else 1.0
+    wav = parse_wav(engine.synthesis(with_prosody(shortest.query, s.max_speed, min_pause), speaker))
+    over = wav.duration - target_sec
     return FitResult(
-        wav=att.wav, original_text=original, text=text, target_sec=target_sec,
-        speed=att.speed, pause_scale=att.pause_scale, status=FitStatus.FAILED,
-        rewrite_attempts=attempts, speech_sec=att.wav.duration,
+        wav=wav, original_text=original, text=shortest.text, target_sec=target_sec,
+        speed=s.max_speed, pause_scale=min_pause, status=FitStatus.FAILED,
+        rewrite_attempts=attempts, speech_sec=wav.duration, candidates=suggestions,
         message=f"{reason}。目標より {over:.2f}秒 長いです（原稿を短くしてください）",
     )

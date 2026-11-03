@@ -54,12 +54,21 @@ class FakeEngine:
 
 
 class FakeRewriter:
-    """指示された文字数に切り詰めるだけの偽の要約"""
+    """指示された文字数に切り詰めるだけの偽の要約。
+
+    shrink=False のときは1文字しか削らない（何度要約しても収まらない状況の再現用）。
+    """
 
     def __init__(self, shrink: bool = True):
         self.shrink = shrink
-        self.calls: list[tuple[str, int, str | None]] = []
+        self.calls: list[dict] = []
 
-    def rewrite(self, text, target_chars, previous=None):
-        self.calls.append((text, target_chars, previous))
-        return text[:target_chars] if self.shrink else text
+    def candidates(self, text, target_chars, previous=None, avoid=None, n=3):
+        self.calls.append({"text": text, "target_chars": target_chars, "previous": previous, "avoid": avoid, "n": n})
+        if not self.shrink:
+            base = previous or text
+            return [base[:-1]]
+        out = [text[:target_chars], text[:max(1, int(target_chars * 0.8))], "短い案"]
+        if avoid:
+            out = [f"{o}ね" for o in out]
+        return out[:n]

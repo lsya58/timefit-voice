@@ -246,16 +246,22 @@ function barHtml(ln, r) {
   const slotW = (target / scale) * 100;
   const fillW = (Math.min(speech, target) / scale) * 100;
   const over = speech > target + 0.0005;
+  const silence = Math.max(0, r.duration - speech);  // 「ぴったり」で足した無音
   const knobs = [`×${r.speed.toFixed(2)}`];
   if (r.pause < 0.999) knobs.push(`間 ${r.pause.toFixed(2)}`);
+  let split;
+  if (over) split = `発話 <b>${sec(speech)}</b> · <b>${sec(speech - target)}</b> 超過`;
+  else if (silence >= 0.05) split = `発話 <b>${sec(speech)}</b> <span class="sil">＋ 無音 ${sec(silence)}</span> ＝ ${sec(r.duration)}`;
+  else split = `発話 <b>${sec(speech)}</b> / 枠 ${sec(target)}`;
   return `<div class="bar">
     <div class="bar-track">
       <div class="bar-slot" style="width:${slotW}%"></div>
       <div class="bar-fill" style="width:${fillW}%"></div>
+      ${silence >= 0.05 && !over ? `<div class="bar-silence" style="left:${fillW}%;width:${slotW - fillW}%"></div>` : ""}
       ${over ? `<div class="bar-over" style="left:${slotW}%;width:${100 - slotW}%"></div>` : ""}
       <div class="bar-edge" style="left:calc(${slotW}% - 1px)"></div>
     </div>
-    <div class="bar-label"><span class="num">${sec(speech)} / ${sec(target)}</span><span class="knobs">${knobs.join(" · ")}</span></div>
+    <div class="bar-label"><span class="num split">${split}</span><span class="knobs">${knobs.join(" · ")}</span></div>
   </div>`;
 }
 
@@ -267,15 +273,25 @@ function rowHtml(ln, i) {
   const spk = ln.speakerFromFile ? `<span class="spk">${esc(speakerName(ln.speaker))}</span>` : "";
   const orig = r && r.rewritten ? `<div class="orig" title="${esc(r.original)}">${esc(r.original)}</div>` : "";
   const msg = r && !r.ok ? `<div class="msg">${esc(r.message.split("（詳細")[0])}</div>` : "";
+  let cta = "";
+  if (r && r.rewritten && !r.approved && state.done) cta = `<button class="review-cta" data-review="${ln.index}">✎ AI が書き換えました · 確認する</button>`;
+  else if (r && r.rewritten && r.approved) cta = `<button class="review-cta done" data-review="${ln.index}">✓ 確認済み</button>`;
+  else if (r && !r.ok && state.done) cta = `<button class="review-cta" data-review="${ln.index}">✎ 原稿を短くする</button>`;
+  const canEdit = r && state.done && !state.running;
   const playing = state.playing === ln.index;
   return `<div class="row ${st === "running" ? "running" : ""}" data-index="${ln.index}" data-st="${st}">
     <span class="idx">${String(ln.index).padStart(2, "0")}</span>
     <span class="start">${clock(state.starts[i])}</span>
-    <button class="play ${playing ? "playing" : ""}" data-play="${ln.index}" ${r ? "" : "disabled"} title="試聴">
-      ${playing ? '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
-                : '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5L8 5.5Z"/></svg>'}
-    </button>
-    <div class="text">${spk}<div class="final" title="${esc(text)}">${esc(text)}</div>${orig}${msg}</div>
+    <span class="row-actions">
+      <button class="play ${playing ? "playing" : ""}" data-play="${ln.index}" ${r ? "" : "disabled"} title="試聴">
+        ${playing ? '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'
+                  : '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5L8 5.5Z"/></svg>'}
+      </button>
+      <button class="edit" data-review="${ln.index}" ${canEdit ? "" : "disabled"} title="原稿を確認・書き直す">
+        <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg>
+      </button>
+    </span>
+    <div class="text">${spk}<div class="final" title="${esc(text)}">${esc(text)}</div>${orig}${msg}${cta}</div>
     <div class="bar-cell" data-tip="${ln.index}">${barHtml(ln, r)}</div>
     <span><span class="chip ${st === "running" ? "running" : ""}"><i></i>${info.glyph ? info.glyph + " " : ""}${info.label}</span></span>
   </div>`;
@@ -317,6 +333,7 @@ function renderStats() {
     ["speed", "» 話速", n(["speed"])],
     ["rewrite", "✎ 要約", n(["rewrite"])],
     ["failed", "⚠ 収まらず", n(["failed"])],
+    ["rewrite", "要確認", vals.filter((r) => r.rewritten && !r.approved).length],
   ].filter((x) => x[2] > 0);
   el.innerHTML = items.map(([k, label, c]) => `<span class="stat" data-st="${k}">${label} <b>${c}</b></span>`).join("");
 }
@@ -415,7 +432,11 @@ window.tf = {
         $("#runBtn span").textContent = "もう一度実行";
         $("#playAll").classList.remove("hidden");
         $("#openOutput").classList.remove("hidden");
+        renderRows();
+        renderStats();
+        const toReview = Object.values(state.results).filter((r) => r.rewritten).length;
         let msg = s.failed ? `完了しました。${s.failed} 行は目標に収まりませんでした（⚠ の行の原稿を短くしてください）。` : "完了しました。すべての行が目標の尺に収まりました。";
+        if (toReview) msg += ` AI が書き換えた ${toReview} 行は「確認する」から内容を確かめてください。`;
         if (s.skipped) msg += ` 無料版のため ${s.skipped} 行は処理していません。`;
         toast(msg, Boolean(s.failed), 7000);
         break;
@@ -501,6 +522,200 @@ async function runDiag() {
     `<div class="diag-item ${i.ok ? "ok" : "ng"}"><span class="mark">${i.ok ? "✓" : "✕"}</span><span>${esc(i.message)}</span></div>`).join("");
 }
 
+/* ---------- 原稿の確認・選び直し ---------- */
+
+// 文字単位の差分（LCS）。a → b で消えた文字は del、増えた文字は ins
+function diffChars(a, b) {
+  const A = [...a], B = [...b];
+  const n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ops = [];
+  const push = (type, ch) => {
+    const last = ops[ops.length - 1];
+    if (last && last.type === type) last.text += ch; else ops.push({ type, text: ch });
+  };
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { push("same", A[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) push("del", A[i++]);
+    else push("ins", B[j++]);
+  }
+  while (i < n) push("del", A[i++]);
+  while (j < m) push("ins", B[j++]);
+  return ops;
+}
+const diffHtml = (ops, show) => ops.map((o) => {
+  if (o.type === "same") return esc(o.text);
+  if (o.type !== show) return "";
+  return show === "del" ? `<del>${esc(o.text)}</del>` : `<ins>${esc(o.text)}</ins>`;
+}).join("");
+
+// 消えると困りそうな語（数字・カタカナ語・3文字以上の漢字語）
+function keyTerms(text) {
+  const found = text.match(/\d+(?:[.,]\d+)?|[ァ-ヴー・]{3,}|[一-龠々]{3,}/g) || [];
+  return [...new Set(found)];
+}
+const lostTerms = (orig, text) => keyTerms(orig).filter((t) => !text.includes(t));
+
+const rv = { index: null, result: null, line: null, selected: null, estTimer: null, estCache: {} };
+
+function estLabel(e) {
+  if (!e) return '<span class="spin"></span>';
+  if (!e.ok) return `<span class="est-ng">${esc(e.error)}</span>`;
+  const base = `推定 ${e.natural.toFixed(2)}s（${e.chars}文字）`;
+  if (!e.fits) return `<span class="est-ng">${base} · 話速 ×${state.settings.max_speed} でも収まりません</span>`;
+  const how = e.speed > 1.0005 ? `話速 ×${e.speed.toFixed(2)} で収まる` : (e.pause < 0.999 ? "間を詰めれば収まる" : "そのまま収まる");
+  return `<span class="est-ok">${base} · ${how}</span>`;
+}
+
+async function estimateCached(text) {
+  if (!rv.estCache[text]) rv.estCache[text] = api().estimate(rv.index, text);
+  return rv.estCache[text];
+}
+
+function openReview(index) {
+  const r = state.results[index];
+  const line = state.file.lines.find((l) => l.index === index);
+  if (!r || !line) return;
+  rv.index = index; rv.result = r; rv.line = line; rv.estCache = {};
+  const i = state.file.lines.indexOf(line);
+  $("#rvTitle").textContent = r.ok ? `#${index} の原稿を確認` : `#${index} の原稿を短くする`;
+  $("#rvMeta").textContent = `開始 ${clock(state.starts[i])} · 目標 ${sec(line.target)} · 今の状態: ${STATUS[r.statusKey].label}`;
+  $("#rvText").value = r.text;
+  rv.selected = r.text;
+  renderReview();
+  $("#reviewModal").classList.remove("hidden");
+  setTimeout(() => $("#rvText").focus(), 50);
+}
+function closeReview() { $("#reviewModal").classList.add("hidden"); rv.index = null; }
+
+function renderReview() {
+  const r = rv.result;
+  const text = $("#rvText").value.trim();
+  $("#rvOriginal").innerHTML = diffHtml(diffChars(r.original, text), "del");
+  const lost = lostTerms(r.original, text);
+  const lostEl = $("#rvLost");
+  lostEl.classList.toggle("hidden", !lost.length);
+  lostEl.innerHTML = lost.length ? `⚠ 選んでいる文では、次の語が消えています（固有名詞・数字の可能性）: ${lost.map((t) => `<b>${esc(t)}</b>`).join("、")}` : "";
+
+  const list = r.candidates.length ? r.candidates : [];
+  const box = $("#rvCands");
+  if (!list.length) {
+    box.innerHTML = `<div class="cands-empty">まだ AI の案はありません。下のボタンで案を出してもらうか、「この文で作る」欄を直接書き直してください。</div>`;
+  } else {
+    box.innerHTML = list.map((c, k) => {
+      const lostN = lostTerms(r.original, c).length;
+      return `<button class="cand ${c === rv.selected ? "on" : ""}" data-cand="${k}">
+        <span class="cand-label">案${k + 1}${c === r.text ? '<span class="now">いまの音声</span>' : ""}</span>
+        <span><span class="cand-text">${diffHtml(diffChars(r.original, c), "ins")}</span>
+        <span class="cand-est" data-est="${k}">${estLabel(null)}${lostN ? `<span class="cand-lost">消えた語 ${lostN}</span>` : ""}</span></span>
+      </button>`;
+    }).join("");
+    list.forEach(async (c, k) => {
+      const e = await estimateCached(c);
+      const el = box.querySelector(`[data-est="${k}"]`);
+      if (el) el.innerHTML = estLabel(e) + (lostTerms(r.original, c).length ? `<span class="cand-lost">消えた語 ${lostTerms(r.original, c).length}</span>` : "");
+    });
+  }
+  updateReviewFooter();
+  scheduleEstimate();
+}
+
+function updateReviewFooter() {
+  const text = $("#rvText").value.trim();
+  const same = text === rv.result.text;
+  const btn = $("#rvApply");
+  btn.textContent = same ? (rv.result.rewritten && !rv.result.approved ? "この内容で確定" : "閉じる") : "この文で作り直す";
+  btn.dataset.action = same ? "approve" : "apply";
+  btn.disabled = !text;
+  $("#rvUseOriginal").disabled = text === rv.result.original;
+}
+
+function scheduleEstimate() {
+  clearTimeout(rv.estTimer);
+  const text = $("#rvText").value.trim();
+  const el = $("#rvEst");
+  if (!text) { el.innerHTML = ""; return; }
+  el.innerHTML = estLabel(null);
+  rv.estTimer = setTimeout(async () => {
+    const e = await estimateCached(text);
+    if ($("#rvText").value.trim() === text) el.innerHTML = estLabel(e);
+  }, 350);
+}
+
+async function moreCandidates() {
+  const btn = $("#rvMore");
+  btn.disabled = true;
+  btn.querySelector("span").textContent = "AI が考えています…";
+  const res = await api().suggest(rv.index);
+  btn.disabled = false;
+  btn.querySelector("span").textContent = "AI に別の案を出してもらう";
+  if (!res.ok) { toast(res.error, true, 6000); return; }
+  rv.result.candidates = res.candidates;
+  state.results[rv.index].candidates = res.candidates;
+  renderReview();
+}
+
+async function applyReview() {
+  const btn = $("#rvApply");
+  const text = $("#rvText").value.trim();
+  if (btn.dataset.action === "approve") {
+    if (rv.result.rewritten && !rv.result.approved) {
+      await api().approve(rv.index);
+      state.results[rv.index].approved = true;
+      updateRow(rv.index);
+      renderStats();
+    }
+    closeReview();
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "作り直しています…";
+  const index = rv.index;
+  const res = await api().apply(index, text);
+  if (!res.ok) { toast(res.error, true, 6000); updateReviewFooter(); return; }
+  state.results[index] = res.result;
+  updateRow(index);
+  renderStats();
+  closeReview();
+  const r = res.result;
+  toast(r.ok ? `#${index} を作り直しました（${STATUS[r.statusKey].label}）。出力ファイルも更新済みです。`
+             : `#${index} はこの文でも ${sec(r.speech - r.target)} はみ出します。もう少し短くしてください。`, !r.ok, 6000);
+}
+
+function bindReview() {
+  $$("[data-close-review]").forEach((b) => b.addEventListener("click", closeReview));
+  $("#reviewModal").addEventListener("click", (e) => { if (e.target.id === "reviewModal") closeReview(); });
+  $("#rvCands").addEventListener("click", (e) => {
+    const c = e.target.closest("[data-cand]");
+    if (!c) return;
+    rv.selected = rv.result.candidates[Number(c.dataset.cand)];
+    $("#rvText").value = rv.selected;
+    renderReview();
+  });
+  $("#rvText").addEventListener("input", () => {
+    const text = $("#rvText").value.trim();
+    rv.selected = rv.result.candidates.includes(text) ? text : null;
+    $$("#rvCands .cand").forEach((el) => el.classList.toggle("on", rv.result.candidates[Number(el.dataset.cand)] === rv.selected));
+    $("#rvOriginal").innerHTML = diffHtml(diffChars(rv.result.original, text), "del");
+    const lost = lostTerms(rv.result.original, text);
+    $("#rvLost").classList.toggle("hidden", !lost.length);
+    $("#rvLost").innerHTML = lost.length ? `⚠ 選んでいる文では、次の語が消えています（固有名詞・数字の可能性）: ${lost.map((t) => `<b>${esc(t)}</b>`).join("、")}` : "";
+    updateReviewFooter();
+    scheduleEstimate();
+  });
+  $("#rvMore").addEventListener("click", moreCandidates);
+  $("#rvApply").addEventListener("click", applyReview);
+  $("#rvUseOriginal").addEventListener("click", () => {
+    $("#rvText").value = rv.result.original;
+    rv.selected = null;
+    renderReview();
+  });
+}
+
 /* ---------- イベント登録 ---------- */
 function bindUi() {
   const pick = async () => setFile(await api().choose_input());
@@ -527,7 +742,11 @@ function bindUi() {
   $("#rows").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-play]");
     if (btn) togglePlay(Number(btn.dataset.play));
+    const rv = e.target.closest("[data-review]");
+    if (rv && !rv.disabled) openReview(Number(rv.dataset.review));
   });
+  $("#trySample").addEventListener("click", async () => setFile(await api().sample()));
+  bindReview();
   $("#rows").addEventListener("mouseover", (e) => {
     const cell = e.target.closest("[data-tip]");
     if (cell && !cell.contains(e.relatedTarget)) showTip(e, Number(cell.dataset.tip));
@@ -555,7 +774,7 @@ function bindUi() {
     $("#creditPrefix").value = b.dataset.credit;
   }));
   $$("[data-url]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); api().open_url(a.dataset.url); }));
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeSettings(); closeReview(); } });
 
   // ドラッグ中の見た目（ファイルの受け取り自体は Python 側で行う）
   let depth = 0;

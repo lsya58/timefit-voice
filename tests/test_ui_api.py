@@ -50,3 +50,14 @@ def test_invalid_settings_are_rolled_back(api):
 
 def test_start_requires_input(api):
     assert not api.start({})["ok"]
+
+
+def test_sample_is_bundled(api):
+    res = api.sample()
+    assert res["ok"] and res["kind"] == "srt" and len(res["lines"]) >= 3
+
+
+def test_review_actions_need_a_finished_job(api):
+    assert not api.apply(1, "テスト")["ok"]
+    assert not api.suggest(1)["ok"]
+    assert not api.estimate(1, "テスト")["ok"]

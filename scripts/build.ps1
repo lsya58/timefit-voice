@@ -29,6 +29,7 @@ try {
         --name $name `
         --collect-submodules google.genai `
         --add-data "timefit\ui\web;timefit\ui\web" `
+        --add-data "samples;samples" `
         main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller が失敗しました" }
 }
