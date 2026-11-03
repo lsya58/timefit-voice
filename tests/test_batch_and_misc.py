@@ -145,44 +145,119 @@ def _api_error(code, message="err"):
     return errors.ClientError(code, {"error": {"code": code, "message": message, "status": "X"}})
 
 
-def test_gemini_retries_on_rate_limit():
-    models = _FakeModels([_api_error(429), _api_error(429)])
-    sleeps = []
-    rw = GeminiRewriter("key", "m", sleep=sleeps.append, client=_FakeClient(models))
+def _quota_error(daily=True, delay="8365s"):
+    from google.genai import errors
+
+    quota = "GenerateRequestsPerDayPerProjectPerModel-FreeTier" if daily else "GenerateRequestsPerMinute"
+    return errors.ClientError(429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED", "details": [
+        {"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": quota}]},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay},
+    ]}})
+
+
+class _RoutingModels:
+    """モデル名ごとに、投げるエラーの列を決められる偽の Gemini"""
+
+    def __init__(self, plan):
+        self.plan = {k: list(v) for k, v in plan.items()}
+        self.calls = []
+        self.configs = []
+
+    def generate_content(self, model, contents, config):
+        self.calls.append(model)
+        self.configs.append(config)
+        queue = self.plan.get(model, [])
+        if queue:
+            raise queue.pop(0)
+
+        class R:
+            text = '["短くした原稿"]'
+            usage_metadata = None
+        return R()
+
+
+def _rw(plan, fallbacks=("lite",), **kw):
+    models = _RoutingModels(plan)
+    sleeps, events = [], []
+    rw = GeminiRewriter("key", "main", fallback_models=list(fallbacks), sleep=sleeps.append,
+                        client=_FakeClient(models), on_event=events.append, **kw)
+    return rw, models, sleeps, events
+
+
+def test_gemini_retries_once_when_busy():
+    rw, models, sleeps, _ = _rw({"main": [_api_error(503)]})
     assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
-    assert models.calls == 3 and sleeps == [2, 4]
+    assert models.calls == ["main", "main"] and sleeps == [1.5]
 
 
 def test_gemini_switches_to_fallback_model_when_busy():
-    calls = []
-
-    class Models(_FakeModels):
-        def generate_content(self, **kwargs):
-            calls.append(kwargs["model"])
-            if kwargs["model"] == "main":
-                raise _api_error(503, "high demand")
-            return super().generate_content(**kwargs)
-
     logs = []
-    rw = GeminiRewriter("key", "main", fallback_models=["lite"], sleep=lambda s: None,
-                        client=_FakeClient(Models([])), log=logs.append)
+    rw, models, _, _ = _rw({"main": [_api_error(503)] * 5}, log=logs.append)
     assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
-    assert calls == ["main", "main", "main", "lite"]
+    assert models.calls == ["main", "main", "lite"]
     assert any("lite に切り替え" in m for m in logs)
+    # 混雑したモデルはしばらく休ませる → 次の行ではいきなり予備を使う
+    rw.candidates("次の原稿", 5)
+    assert models.calls[-1] == "lite" and models.calls.count("main") == 2
+
+
+def test_daily_quota_switches_immediately_without_waiting():
+    rw, models, sleeps, events = _rw({"main": [_quota_error(daily=True)]})
+    assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
+    assert models.calls == ["main", "lite"]
+    assert sleeps == []  # 1日の上限は待っても無駄なので待たない
+    assert [e["result"] for e in events if e["type"] == "gemini"] == ["429-day", "ok"]
+    rw.candidates("次", 5)
+    assert models.calls.count("main") == 1  # 回復するまで上限のモデルには問い合わせない
+
+
+def test_short_rate_limit_waits_the_suggested_delay():
+    rw, models, sleeps, _ = _rw({"main": [_quota_error(daily=False, delay="3s")]})
+    assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
+    assert models.calls == ["main", "main"] and sleeps == [3.0]
+
+
+def test_unsupported_thinking_level_is_dropped_for_that_model():
+    err = _api_error(400, "Thinking level MINIMAL is not supported for this model.")
+    rw, models, _, _ = _rw({"main": [err]}, thinking_level="minimal")
+    assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
+    assert models.calls == ["main", "main"]
+    assert models.configs[0].thinking_config is not None and models.configs[1].thinking_config is None
+
+
+def test_timeout_switches_to_fallback():
+    class ReadTimeout(Exception):
+        pass
+
+    rw, models, _, events = _rw({"main": [ReadTimeout("timed out")]})
+    assert rw.candidates("元の原稿", 5) == ["短くした原稿"]
+    assert models.calls == ["main", "lite"]
+    assert events[0]["result"] == "timeout"
+
+
+def test_gemini_invalid_key():
+    rw, _, _, _ = _rw({"main": [_api_error(400, "API key not valid. Please pass a valid API key.")]})
+    with pytest.raises(ApiKeyInvalidError):
+        rw.candidates("元の原稿", 5)
 
 
 def test_gemini_all_models_busy_raises_llm_error():
-    models = _FakeModels([_api_error(503)] * 6)
-    rw = GeminiRewriter("key", "a", fallback_models=["b"], sleep=lambda s: None, client=_FakeClient(models))
+    rw, _, _, _ = _rw({"main": [_api_error(503)] * 3, "lite": [_api_error(503)] * 3})
     with pytest.raises(LLMError, match="混雑"):
         rw.candidates("元の原稿", 5)
 
 
-def test_gemini_invalid_key():
-    models = _FakeModels([_api_error(400, "API key not valid. Please pass a valid API key.")])
-    rw = GeminiRewriter("key", "m", sleep=lambda s: None, client=_FakeClient(models))
-    with pytest.raises(ApiKeyInvalidError):
-        rw.candidates("元の原稿", 5)
+def test_run_job_records_timing(tmp_path):
+    src = tmp_path / "script.srt"
+    src.write_text(SRT, encoding="utf-8")
+    logs = []
+    summary = batch.run_job(src, tmp_path / "out", AppConfig(), engine=FakeEngine(), rewriter=FakeRewriter(), log=logs.append)
+    t = summary.results[1].timing
+    assert t.synth_calls >= 1 and t.query_calls >= 1
+    assert summary.timing.synth_calls >= t.synth_calls
+    assert any(m.startswith("処理時間の内訳") for m in logs)
+    header = (tmp_path / "out" / "report.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+    assert "AI呼び出し" in header and "合成回数" in header
 
 
 # ---------- 設定 ----------
@@ -250,3 +325,15 @@ def test_estimate_text():
     long = batch.estimate_text("あ" * 60, 3, 2.0, cfg, engine=FakeEngine())
     assert short["fits"] and short["speed"] == 1.0
     assert not long["fits"] and long["natural"] > 2.0
+
+
+def test_old_default_models_are_migrated_but_user_choices_are_kept(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "config.json"
+    path.write_text('{"gemini_model": "gemini-3.8-flash", "gemini_fallback_model": "gemini-flash-lite-latest"}', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.gemini_model == "gemini-flash-lite-latest" and cfg.gemini_fallback_model == "gemini-3.8-flash"
+
+    path.write_text('{"gemini_model": "gemini-3.8-flash", "gemini_fallback_model": "my-model"}', encoding="utf-8")
+    assert load_config(path).gemini_model == "gemini-3.8-flash"

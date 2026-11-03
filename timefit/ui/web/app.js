@@ -356,6 +356,14 @@ function showTip(e, index) {
   if (r) {
     rows.push(["話している部分", sec(r.speech)], ["話速", `×${r.speed.toFixed(2)}`]);
     if (r.pause < 0.999) rows.push(["句読点の間", `×${r.pause.toFixed(2)}`]);
+    const t = r.timing;
+    if (t) {
+      rows.push(["処理時間", sec(t.total)]);
+      if (t.aiCalls) rows.push(["　うち AI", `${sec(t.ai)} ×${t.aiCalls}回`]);
+      if (t.wait) rows.push(["　うち 待ち", sec(t.wait)]);
+      rows.push(["　うち 合成", `${sec(t.synth)} ×${t.synthCalls}回`]);
+      if (t.aiErrors) rows.push(["AI のエラー", esc(t.aiErrors)]);
+    }
   }
   const tip = $("#tooltip");
   tip.innerHTML = `<div class="tt-title">#${index} · ${st.glyph ? st.glyph + " " : ""}${st.label}</div>` +
@@ -485,6 +493,7 @@ function openSettings() {
   $("#apiKey").placeholder = s.hasApiKey ? `設定済み（${s.apiKeyHint}）· 変更するときだけ入力` : "未設定";
   $("#model").value = s.gemini_model;
   $("#fallbackModel").value = s.gemini_fallback_model;
+  $("#thinking").value = s.gemini_thinking;
   $("#rewriteAttempts").value = s.max_rewrite_attempts;
   $("#minPause").value = s.min_pause_scale;
   $("#engineUrl").value = s.engine_url;
@@ -499,6 +508,7 @@ async function saveSettings() {
     gemini_api_key: $("#apiKey").value,
     gemini_model: $("#model").value.trim(),
     gemini_fallback_model: $("#fallbackModel").value.trim(),
+    gemini_thinking: $("#thinking").value,
     max_rewrite_attempts: Number($("#rewriteAttempts").value),
     min_pause_scale: Number($("#minPause").value),
     engine_url: $("#engineUrl").value.trim(),

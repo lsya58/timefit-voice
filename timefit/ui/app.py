@@ -67,6 +67,7 @@ def _result_dict(index: int, r: FitResult, filename: str, approved: bool = False
         "approved": approved,
         "message": r.message,
         "file": filename,
+        "timing": r.timing.as_dict() if r.timing is not None else None,
     }
 
 

@@ -1,6 +1,7 @@
 """台本ファイル1つをまとめて処理する（CLI と GUI の共通部分）"""
 
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -13,6 +14,7 @@ from .fitter import FitResult, FitStatus, fit_text, plan_prosody, rewrite_target
 from .engine import estimate_duration, with_prosody
 from .inputs import ScriptLine, load_script
 from .llm import GeminiRewriter, Rewriter
+from .timing import Recorder, Stats, TimedEngine
 from .outputs import credit_text, wav_filename, write_combined_wav, write_report, write_srt
 
 Log = Callable[[str], None]
@@ -33,6 +35,7 @@ class JobSummary:
     approved: set[int] = field(default_factory=set)          # 要約を確認済みの行番号
     skipped_by_limit: int = 0
     cancelled: bool = False
+    timing: Stats | None = None
 
     def position(self, index: int) -> int:
         for pos, ln in enumerate(self.lines):
@@ -51,14 +54,21 @@ class JobSummary:
         return c
 
 
-def make_rewriter(cfg: AppConfig, log: Log) -> Rewriter | None:
+def gemini_rewriter(cfg: AppConfig, log: Log, on_event=lambda _e: None) -> GeminiRewriter:
+    fallbacks = [m.strip() for m in cfg.gemini_fallback_model.split(",")]
+    return GeminiRewriter(
+        cfg.gemini_api_key, cfg.gemini_model, fallback_models=fallbacks, log=log,
+        thinking_level=cfg.gemini_thinking, on_event=on_event,
+    )
+
+
+def make_rewriter(cfg: AppConfig, log: Log, on_event=lambda _e: None) -> Rewriter | None:
     if not cfg.allow_rewrite:
         return None
     if not cfg.gemini_api_key:
         log("※ Gemini の APIキーが未設定のため、要約は行いません（話速の調整だけで合わせます）。")
         return None
-    fallbacks = [m.strip() for m in cfg.gemini_fallback_model.split(",")]
-    return GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, fallback_models=fallbacks, log=log)
+    return gemini_rewriter(cfg, log, on_event)
 
 
 def run_job(
@@ -75,14 +85,18 @@ def run_job(
     """入力ファイルを読み、1行ずつ尺合わせして、出力フォルダに結果をまとめて書き出す"""
     script = load_script(input_path)
     lines = script.lines
-    engine = engine or VoicevoxClient(cfg.engine_url)
+    rec = Recorder()
+    engine = TimedEngine(engine or VoicevoxClient(cfg.engine_url), rec)
 
     log(f"音声エンジンを確認しています（{cfg.engine_url}）...")
     log(f"  バージョン: {engine.version()}")
     if rewriter is None:
-        rewriter = make_rewriter(cfg, log)
+        rewriter = make_rewriter(cfg, log, rec.on_gemini_event)
+    elif isinstance(rewriter, GeminiRewriter):
+        rewriter._on_event = rec.on_gemini_event
 
     summary = JobSummary(output_dir=Path(output_dir), kind=script.kind)
+    summary.timing = rec.total
     limit = edition.line_limit()
     if limit is not None and len(lines) > limit:
         summary.skipped_by_limit = len(lines) - limit
@@ -103,21 +117,23 @@ def run_job(
             on_line_start(i, len(lines), line)
         log(f"[{i}/{len(lines)}] 目標 {line.target_sec:.2f}秒: {line.text}")
         llm_error = None
-        try:
-            result = fit_text(line.text, speaker, line.target_sec, engine, rewriter, settings, log)
-        except LLMError as e:
-            # 要約だけ失敗した行は、要約なしでできるところまで合わせる
-            # （APIキーの誤りは LLMError ではないので、ここでは捕まえず全体を止める）
-            llm_error = e
-            log(f"  ⚠ {e}")
-            log("  この行は要約なしで、できるところまで合わせます。")
-            result = fit_text(
-                line.text, speaker, line.target_sec, engine, None, settings, log,
-                no_rewrite_reason="AI の要約に失敗しました",
-            )
-
-        name = wav_filename(line, result)
-        (out / name).write_bytes(result.wav.to_bytes())
+        with rec.line() as stats:
+            try:
+                result = fit_text(line.text, speaker, line.target_sec, engine, rewriter, settings, log)
+            except LLMError as e:
+                # 要約だけ失敗した行は、要約なしでできるところまで合わせる
+                # （APIキーの誤りは LLMError ではないので、ここでは捕まえず全体を止める）
+                llm_error = e
+                log(f"  ⚠ {e}")
+                log("  この行は要約なしで、できるところまで合わせます。")
+                result = fit_text(
+                    line.text, speaker, line.target_sec, engine, None, settings, log,
+                    no_rewrite_reason="AI の要約に失敗しました",
+                )
+            name = wav_filename(line, result)
+            (out / name).write_bytes(result.wav.to_bytes())
+        result.timing = stats
+        log(f"  {stats.summary()}")
         if not result.ok:
             log(f"  ⚠ {result.message}")
         if llm_error is not None:
@@ -130,7 +146,14 @@ def run_job(
             on_progress(i, len(lines), line, result, name)
 
     if summary.results:
+        t0 = time.perf_counter()
         write_outputs(summary, cfg, engine, log)
+        save_sec = time.perf_counter() - t0
+        t = rec.total
+        log(f"処理時間の内訳: {t.summary()}、ファイル保存 {save_sec:.1f}秒")
+        if t.ai_calls:
+            used = "、".join(f"{m}×{n}" for m, n in t.models.items()) or "なし"
+            log(f"  AI: 成功したモデル {used} / トークン 入力{t.in_tokens}・出力{t.out_tokens}・思考{t.thought_tokens}")
     c = summary.counts()
     log("完了: " + "、".join(f"{k} {v}件" for k, v in c.items() if v))
     log(f"出力先: {out}")
@@ -198,8 +221,7 @@ def suggest_candidates(summary: JobSummary, index: int, cfg: AppConfig, engine=N
     pos = summary.position(index)
     line, old = summary.lines[pos], summary.results[pos]
     engine = engine or VoicevoxClient(cfg.engine_url)
-    fallbacks = [m.strip() for m in cfg.gemini_fallback_model.split(",")]
-    rewriter = GeminiRewriter(cfg.gemini_api_key, cfg.gemini_model, fallback_models=fallbacks, log=log)
+    rewriter = gemini_rewriter(cfg, log)
     return add_candidates(old, rewriter, engine, summary.speakers[pos], line.target_sec, cfg)
 
 

@@ -224,6 +224,17 @@
           <label class="field"><span>混雑時の予備モデル</span><input id="fallbackModel"></label>
         </div>
         <div class="field-row">
+          <label class="field"><span>思考の深さ</span>
+            <select id="thinking">
+              <option value="low">low（速い・おすすめ）</option>
+              <option value="medium">medium</option>
+              <option value="high">high（遅い）</option>
+              <option value="">モデルの既定</option>
+            </select>
+          </label>
+          <span></span>
+        </div>
+        <div class="field-row">
           <label class="field"><span>要約の最大回数</span><input id="rewriteAttempts" type="number" min="0" max="5"></label>
           <label class="field"><span>句読点の間を詰める下限</span><input id="minPause" type="number" min="0" max="1" step="0.05"></label>
         </div>

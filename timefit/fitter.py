@@ -58,6 +58,7 @@ class FitResult:
     message: str = ""
     speech_sec: float = 0.0  # 無音を足す前の、実際にしゃべっている部分の長さ
     candidates: list[str] = field(default_factory=list)  # AI が出した案（採用したものも含む）
+    timing: object = None  # 処理時間の内訳（timing.Stats）。一括処理のときに入る
 
     @property
     def duration(self) -> float:

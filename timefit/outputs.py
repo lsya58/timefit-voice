@@ -48,7 +48,10 @@ def write_srt(path: Path, lines: list[ScriptLine], results: list[FitResult]) -> 
     path.write_text("\n".join(out), encoding="utf-8")
 
 
-REPORT_HEADER = ["番号", "状態", "目標秒数", "生成秒数", "話速", "間", "要約回数", "ファイル", "元の原稿", "最終原稿", "メモ"]
+REPORT_HEADER = [
+    "番号", "状態", "目標秒数", "生成秒数", "話速", "間", "要約回数", "ファイル", "元の原稿", "最終原稿", "メモ",
+    "処理秒数", "AI秒数", "AI呼び出し", "AIエラー", "合成秒数", "合成回数",
+]
 
 
 def write_report(path: Path, lines: list[ScriptLine], results: list[FitResult], files: list[str]) -> None:
@@ -60,8 +63,14 @@ def write_report(path: Path, lines: list[ScriptLine], results: list[FitResult], 
             w.writerow([
                 ln.index, r.status.value, f"{r.target_sec:.3f}", f"{r.duration:.3f}",
                 f"{r.speed:.2f}", f"{r.pause_scale:.2f}", r.rewrite_attempts, name,
-                r.original_text, r.text, r.message,
+                r.original_text, r.text, r.message, *_timing_cells(r.timing),
             ])
+
+
+def _timing_cells(t) -> list:
+    if t is None:  # 確認画面で作り直した行など
+        return ["", "", "", "", "", ""]
+    return [f"{t.total_sec:.2f}", f"{t.ai_sec:.2f}", t.ai_calls, t.errors_text(), f"{t.synth_sec:.2f}", t.synth_calls]
 
 
 def credit_text(prefix: str, character_names: list[str]) -> str:

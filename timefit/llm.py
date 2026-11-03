@@ -2,6 +2,7 @@
 
 import json
 import re
+import threading
 import time
 from typing import Protocol
 
@@ -24,6 +25,7 @@ SYSTEM_PROMPT = (
     "ルール:\n"
     "- 元の意味・主張・重要な固有名詞・数字は残す\n"
     "- 新しい情報を足さない\n"
+    "- 数字は算用数字のまま書く（例: 260年）\n"
     "- 自然な話し言葉の日本語にする\n"
     "- 各案は原稿の本文だけ。説明・前置き・かぎ括弧・改行・記号の装飾は付けない"
 )
@@ -107,8 +109,52 @@ def sanitize_output(raw: str | None) -> str:
     return text
 
 
-# リトライする HTTP ステータス（レート制限・一時的なサーバーエラー）
-_RETRYABLE = {408, 429, 500, 502, 503, 504}
+# ---------- Gemini ----------
+
+# モデルごとの「いつまで使わないか」（アプリ起動中は共有する）。
+# 1日の上限に達したモデルに何度も問い合わせると、待ち時間と回数の枠を無駄にするため。
+_blocked_until: dict[str, float] = {}
+_unsupported_thinking: set[str] = set()
+_state_lock = threading.Lock()
+
+BUSY_COOLDOWN_SEC = 60        # 混雑（503）・タイムアウトのとき、そのモデルを休ませる時間
+SHORT_WAIT_LIMIT_SEC = 10     # この秒数までの「待ってね」はその場で待つ。長ければ予備に切り替える
+REQUEST_TIMEOUT_MS = 30_000
+
+
+def reset_model_state() -> None:
+    """テスト用: モデルの休止状態を消す"""
+    with _state_lock:
+        _blocked_until.clear()
+        _unsupported_thinking.clear()
+
+
+def _block(model: str, seconds: float) -> None:
+    with _state_lock:
+        _blocked_until[model] = max(_blocked_until.get(model, 0.0), time.monotonic() + seconds)
+
+
+def _blocked_for(model: str) -> float:
+    with _state_lock:
+        return max(0.0, _blocked_until.get(model, 0.0) - time.monotonic())
+
+
+def _retry_delay(e) -> float | None:
+    """429 の応答に入っている「何秒後に再試行してよいか」"""
+    m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', json.dumps(getattr(e, "details", None) or {}))
+    return float(m.group(1)) if m else None
+
+
+def _is_daily_quota(e) -> bool:
+    return "PerDay" in json.dumps(getattr(e, "details", None) or {})
+
+
+def _fmt_wait(sec: float) -> str:
+    if sec >= 3600:
+        return f"約{sec / 3600:.1f}時間"
+    if sec >= 60:
+        return f"約{sec / 60:.0f}分"
+    return f"{sec:.0f}秒"
 
 
 class _ModelUnavailable(Exception):
@@ -116,15 +162,26 @@ class _ModelUnavailable(Exception):
 
 
 class GeminiRewriter:
+    """Gemini で要約案を作る。
+
+    on_event には計測用の辞書が渡される（原稿の本文や APIキーは含めない）:
+      {"type": "gemini", "model", "result": "ok|503|429-day|429-minute|timeout|network|400|...", "sec",
+       "in_tokens", "out_tokens", "thought_tokens"}
+      {"type": "wait", "sec", "reason"}
+    """
+
     def __init__(
         self,
         api_key: str,
         model: str,
         fallback_models: tuple[str, ...] | list[str] = (),
-        max_retries: int = 2,
+        max_retries: int = 1,
         sleep=time.sleep,
         client=None,
         log=lambda _m: None,
+        thinking_level: str = "low",
+        on_event=lambda _e: None,
+        timeout_ms: int = REQUEST_TIMEOUT_MS,
     ):
         if not api_key:
             raise ApiKeyMissingError(
@@ -133,12 +190,15 @@ class GeminiRewriter:
         # 重複や空欄を除いて、使う順に並べる
         self.models = list(dict.fromkeys(m for m in [model, *fallback_models] if m))
         self.max_retries = max_retries
+        self.thinking_level = (thinking_level or "").upper()
         self._sleep = sleep
         self._log = log
+        self._on_event = on_event
         if client is None:
             from google import genai  # 要約を使うときだけ読み込む（起動を速くするため）
+            from google.genai import types
 
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=timeout_ms))
         self._client = client
 
     @property
@@ -150,50 +210,121 @@ class GeminiRewriter:
     ) -> list[str]:
         prompt = build_prompt(text, target_chars, previous, avoid, n)
         reasons = []
-        for i, model in enumerate(self.models):
+        for model in self.models:
+            wait = _blocked_for(model)
+            if wait > 0:
+                reasons.append(f"{model}: あと{_fmt_wait(wait)}休止中")
+                continue
             try:
                 return self._call(model, prompt)
             except _ModelUnavailable as e:
                 reasons.append(f"{model}: {e}")
-                if i + 1 < len(self.models):
-                    self._log(f"     {model} が使えないため、{self.models[i + 1]} に切り替えます（{e}）")
+                nxt = next((m for m in self.models[self.models.index(model) + 1:] if _blocked_for(m) == 0), None)
+                if nxt:
+                    self._log(f"     {model} が使えないため、{nxt} に切り替えます（{e}）")
         raise LLMError(
             "Gemini が混雑しているか利用上限に達していて、要約できませんでした。"
-            "少し時間をおいて再実行してください。（" + " / ".join(reasons) + "）"
+            "少し時間をおいて再実行するか、設定で別のモデルを指定してください。（" + " / ".join(reasons) + "）"
         )
+
+    def _config(self, model: str):
+        from google.genai import types
+
+        kw = dict(system_instruction=SYSTEM_PROMPT, temperature=0.5, response_mime_type="application/json")
+        if self.thinking_level and model not in _unsupported_thinking:
+            kw["thinking_config"] = types.ThinkingConfig(thinking_level=self.thinking_level)
+        return types.GenerateContentConfig(**kw)
+
+    def _event(self, **kw):
+        try:
+            self._on_event(kw)
+        except Exception:
+            pass
+
+    def _wait(self, sec: float, reason: str):
+        self._event(type="wait", sec=sec, reason=reason)
+        self._sleep(sec)
 
     def _call(self, model: str, prompt: str) -> list[str]:
-        from google.genai import errors, types
+        from google.genai import errors
 
-        config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT, temperature=0.5, response_mime_type="application/json",
-        )
-        for attempt in range(self.max_retries + 1):
+        attempt = 0
+        thinking_retry_done = False
+        while True:
+            t0 = time.perf_counter()
             try:
-                res = self._client.models.generate_content(model=model, contents=prompt, config=config)
+                res = self._client.models.generate_content(model=model, contents=prompt, config=self._config(model))
             except errors.APIError as e:
-                if e.code in (401, 403) or (e.code == 400 and "API key" in str(e)):
+                sec = time.perf_counter() - t0
+                code = e.code
+                if code in (401, 403) or (code == 400 and "API key" in str(e)):
+                    self._event(type="gemini", model=model, result="auth", sec=sec)
                     raise ApiKeyInvalidError(
                         "Gemini の APIキーが正しくないか、使えない状態です。設定画面でキーを確認してください。"
                     ) from None
-                if e.code == 404:
+                if code == 400 and "hinking" in str(e.message) and not thinking_retry_done:
+                    # このモデルは指定した思考レベルに対応していない → 指定なしでやり直す
+                    self._event(type="gemini", model=model, result="400-thinking", sec=sec)
+                    with _state_lock:
+                        _unsupported_thinking.add(model)
+                    thinking_retry_done = True
+                    continue
+                if code == 404:
+                    self._event(type="gemini", model=model, result="404", sec=sec)
+                    _block(model, 24 * 3600)
                     raise _ModelUnavailable("モデルが見つかりません") from None
-                if e.code in _RETRYABLE:
+                if code == 429:
+                    delay = _retry_delay(e)
+                    if _is_daily_quota(e) or (delay or 0) > SHORT_WAIT_LIMIT_SEC:
+                        self._event(type="gemini", model=model, result="429-day" if _is_daily_quota(e) else "429-minute", sec=sec)
+                        wait = delay or 3600
+                        _block(model, wait)
+                        label = "1日の利用上限" if _is_daily_quota(e) else "利用上限"
+                        raise _ModelUnavailable(f"{label}。回復まで{_fmt_wait(wait)}") from None
+                    self._event(type="gemini", model=model, result="429-minute", sec=sec)
                     if attempt < self.max_retries:
-                        wait = 2 ** (attempt + 1)
-                        self._log(f"     Gemini が混雑しています（{e.code}）。{wait}秒後に再試行します...")
-                        self._sleep(wait)
+                        attempt += 1
+                        self._wait(delay or 2, "429")
                         continue
-                    raise _ModelUnavailable("利用上限" if e.code == 429 else f"混雑（{e.code}）") from None
-                raise LLMError(f"Gemini でエラーが発生しました（{e.code}）: {e.message}") from None
-            except Exception as e:  # 通信エラーなど
+                    _block(model, BUSY_COOLDOWN_SEC)
+                    raise _ModelUnavailable("利用上限（1分あたり）") from None
+                if code in _RETRYABLE:
+                    self._event(type="gemini", model=model, result=str(code), sec=sec)
+                    if attempt < self.max_retries:
+                        attempt += 1
+                        self._log(f"     Gemini が混雑しています（{code}）。少し待って再試行します...")
+                        self._wait(1.5, str(code))
+                        continue
+                    _block(model, BUSY_COOLDOWN_SEC)
+                    raise _ModelUnavailable(f"混雑（{code}）") from None
+                self._event(type="gemini", model=model, result=str(code), sec=sec)
+                raise LLMError(f"Gemini でエラーが発生しました（{code}）: {e.message}") from None
+            except Exception as e:  # タイムアウト・通信エラー
+                sec = time.perf_counter() - t0
+                is_timeout = "Timeout" in type(e).__name__
+                self._event(type="gemini", model=model, result="timeout" if is_timeout else "network", sec=sec)
+                if is_timeout:
+                    _block(model, BUSY_COOLDOWN_SEC)
+                    raise _ModelUnavailable(f"{sec:.0f}秒で応答がありませんでした") from None
                 if attempt < self.max_retries:
-                    self._sleep(2 ** (attempt + 1))
+                    attempt += 1
+                    self._wait(1.5, "network")
                     continue
                 raise LLMError(f"Gemini に接続できませんでした。ネット接続を確認してください。（{e}）") from None
 
+            sec = time.perf_counter() - t0
+            u = getattr(res, "usage_metadata", None)
+            self._event(
+                type="gemini", model=model, result="ok", sec=sec,
+                in_tokens=getattr(u, "prompt_token_count", None) or 0,
+                out_tokens=getattr(u, "candidates_token_count", None) or 0,
+                thought_tokens=getattr(u, "thoughts_token_count", None) or 0,
+            )
             result = parse_candidates(res.text)
             if not result:
                 raise LLMError("Gemini から空の結果が返ってきました。")
             return result
-        raise _ModelUnavailable("再試行の上限")  # ここには来ない
+
+
+# リトライする HTTP ステータス（一時的なサーバーエラー）
+_RETRYABLE = {408, 500, 502, 503, 504}
