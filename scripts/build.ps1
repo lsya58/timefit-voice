@@ -27,6 +27,7 @@ try {
     & $python -m PyInstaller --noconfirm --clean --onedir --windowed `
         --contents-directory _internal --name $name `
         --collect-submodules google.genai `
+        --exclude-module google.genai.tests --exclude-module pytest --exclude-module _pytest `
         --add-data "timefit\ui\web;timefit\ui\web" `
         --add-data "edition.txt;." `
         --add-data "samples\sample.srt;samples" `
@@ -54,7 +55,7 @@ $licenses = Join-Path $stage "THIRD_PARTY_LICENSES.txt"
     Out-File $licenses -Encoding utf8
 if ($LASTEXITCODE -ne 0 -or (Get-Item $licenses).Length -eq 0) { throw "第三者ライセンス一覧を生成できませんでした。" }
 
-& $python "scripts\audit_release.py" $stage $Edition
+& $python "scripts\audit_release.py" $stage $Edition (Join-Path $repo "build\$name\Analysis-00.toc")
 if ($LASTEXITCODE -ne 0) { throw "配布物の監査に失敗しました。ZIP は作りません。" }
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path $stage -DestinationPath $zip

@@ -1,9 +1,10 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from scripts.audit_release import audit
+from scripts.audit_release import _public_certifi_bundle, _relative_name, audit
 from timefit import config
 from timefit.config import AppConfig
 from timefit.errors import ConfigError
@@ -71,3 +72,70 @@ def test_release_audit_rejects_secret_and_wrong_edition(tmp_path, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "secret-value-123")
     (root / "samples" / "sample.csv").write_text("secret-value-123", encoding="utf-8")
     assert any("known API key" in issue for issue in audit(root, "free"))
+
+
+PUBLIC_CA = b"-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n"
+PRIVATE_KEY = b"-----BEGIN PRIVATE KEY-----\nYQ==\n-----END PRIVATE KEY-----\n"
+
+
+@pytest.mark.parametrize("edition,exe", [("free", "TimeFitVoice_Free.exe"), ("pro", "TimeFitVoice_Pro.exe")])
+def test_certifi_bundle_only_allowed_when_identical_to_installed_source(tmp_path, edition, exe):
+    root = tmp_path / "rc"
+    (root / "_internal" / "certifi").mkdir(parents=True)
+    (root / "_internal" / "timefit" / "ui" / "web").mkdir(parents=True)
+    (root / "samples").mkdir()
+    for name in (exe, "samples/sample.srt", "samples/sample.csv", "はじめにお読みください.md",
+                 "利用条件.txt", "THIRD_PARTY_LICENSES.txt", "_internal/timefit/ui/web/index.html",
+                 "_internal/timefit/ui/web/style.css", "_internal/timefit/ui/web/app.js"):
+        (root / name).write_text("safe", encoding="utf-8")
+    (root / "_internal" / "edition.txt").write_text(edition, encoding="ascii")
+    bundle = root / "_internal" / "certifi" / "cacert.pem"
+    bundle.write_bytes(PUBLIC_CA)
+    installed = tmp_path / "installed-certifi-cacert.pem"
+    installed.write_bytes(PUBLIC_CA)
+    toc = tmp_path / "Analysis-00.toc"
+    toc.write_text("[('timefit.ui.app', 'module.py', 'PYMODULE')]", encoding="utf-8")
+    assert audit(root, edition, toc, installed) == []
+
+    bundle.write_bytes(PUBLIC_CA + b"changed")
+    assert any("forbidden file" in issue for issue in audit(root, edition, toc, installed))
+    bundle.write_bytes(PUBLIC_CA)
+    (root / "_internal" / "other.pem").write_bytes(PUBLIC_CA)
+    assert any("other.pem" in issue for issue in audit(root, edition, toc, installed))
+    (root / "_internal" / "other.pem").unlink()
+    bundle.write_bytes(PRIVATE_KEY)
+    installed.write_bytes(PRIVATE_KEY)
+    assert any("cacert.pem" in issue for issue in audit(root, edition, toc, installed))
+
+    bundle.write_bytes(PUBLIC_CA)
+    installed.write_bytes(PUBLIC_CA)
+    (root / "_internal" / "_pytest").mkdir()
+    issues = audit(root, edition, toc, installed)
+    assert any("development package" in issue for issue in issues)
+    (root / "_internal" / "_pytest").rmdir()
+    (root / "_internal" / ".env").write_text("GEMINI_API_KEY=dummy", encoding="utf-8")
+    (root / "_internal" / "config.json").write_text("{}", encoding="utf-8")
+    issues = audit(root, edition, toc, installed)
+    assert any(".env" in issue for issue in issues)
+    assert any("config.json" in issue for issue in issues)
+
+
+def test_certifi_path_is_exact_but_windows_case_and_separators_are_accepted(tmp_path):
+    installed = tmp_path / "cacert.pem"
+    installed.write_bytes(PUBLIC_CA)
+    assert _relative_name(Path(r"_INTERNAL\CERTIFI\CACERT.PEM")) == "_internal/certifi/cacert.pem"
+    assert _public_certifi_bundle(Path(r"_INTERNAL\CERTIFI\CACERT.PEM"), PUBLIC_CA, installed)
+    assert not _public_certifi_bundle(Path(r"_internal\other\cacert.pem"), PUBLIC_CA, installed)
+    assert not _public_certifi_bundle(Path(r"_internal\certifi\private.pem"), PUBLIC_CA, installed)
+    assert not _public_certifi_bundle(Path(r"_internal\certifi\cacert.pem"), PUBLIC_CA, tmp_path / "missing.pem")
+
+
+def test_analysis_rejects_development_modules(tmp_path):
+    # The package audit must not pass if PyInstaller bundled test-only modules in PYZ.
+    root = tmp_path / "rc"
+    root.mkdir()
+    toc = tmp_path / "Analysis-00.toc"
+    toc.write_text("[('google.genai.tests.example', 'x', 'PYMODULE'), ('pytest', 'y', 'PYMODULE'), ('_pytest', 'z', 'PYMODULE')]", encoding="utf-8")
+    assert any("development module" in issue for issue in audit(root, "free", toc))
+    toc.unlink()
+    assert any("analysis file" in issue for issue in audit(root, "free", toc))
