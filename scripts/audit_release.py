@@ -1,5 +1,6 @@
 """Fail closed before zipping a Windows release candidate."""
 
+import ast
 import hashlib
 import os
 import re
@@ -8,7 +9,37 @@ from pathlib import Path
 
 
 CERTIFI_BUNDLE = "_internal/certifi/cacert.pem"
-DEVELOPMENT_MODULE = re.compile(r"['\"](?:(?:pytest|_pytest|google\.genai\.tests)(?:\.|['\"]))", re.IGNORECASE)
+MODULE_TYPES = {"PYSOURCE", "EXTENSION", "PYMODULE", "PYMODULE-1", "PYMODULE-2"}
+
+
+def _development_module(name: str) -> bool:
+    name = name.casefold()
+    return (name in {"pytest", "_pytest", "google.genai.tests", "google.genai._test_api_client"}
+            or name.startswith(("pytest.", "_pytest.", "google.genai.tests.")))
+
+
+def _collected_development_modules(toc_file: Path) -> list[tuple[str, str, str]]:
+    """Read collected TOC triplets, not the requested/missing hidden-import names.
+
+    Analysis-00.toc also stores input options such as hiddenimports; searching its
+    raw text falsely treats unsuccessful import requests as packaged modules.
+    """
+    structure = ast.literal_eval(toc_file.read_text(encoding="utf-8"))
+    found = set()
+
+    def visit(value):
+        if isinstance(value, (tuple, list)):
+            if (len(value) == 3 and all(isinstance(item, str) for item in value)
+                    and value[2] in MODULE_TYPES):
+                name, source, kind = value
+                if _development_module(name):
+                    found.add((name, source, kind))
+            else:
+                for item in value:
+                    visit(item)
+
+    visit(structure)
+    return sorted(found)
 
 
 def _relative_name(path: Path) -> str:
@@ -56,11 +87,13 @@ def audit(root: Path, edition: str, analysis_toc: Path | None = None,
         errors.append("unexpected sample files")
     if analysis_toc is not None:
         try:
-            toc = analysis_toc.read_text(encoding="utf-8")
-            if DEVELOPMENT_MODULE.search(toc):
-                errors.append("development module in PyInstaller analysis")
-        except OSError:
-            errors.append("PyInstaller analysis file is missing or unreadable")
+            collected = _collected_development_modules(analysis_toc)
+            for name, source, kind in collected[:20]:
+                errors.append(f"collected development module in {analysis_toc.name}: {name} [{kind}] <- {source}")
+            if len(collected) > 20:
+                errors.append(f"{len(collected) - 20} more collected development modules in {analysis_toc.name}")
+        except (OSError, ValueError, SyntaxError, UnicodeError, RecursionError) as exc:
+            errors.append(f"cannot inspect collected modules in {analysis_toc}: {type(exc).__name__}: {exc}")
     secrets = set()
     for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
         if os.environ.get(key):
@@ -74,7 +107,8 @@ def audit(root: Path, edition: str, analysis_toc: Path | None = None,
     for path in root.rglob("*"):
         rel = path.relative_to(root)
         relative_name = _relative_name(rel)
-        if re.match(r"_internal/(?:pytest|_pytest|google/genai/tests)(?:/|$)", relative_name):
+        if (re.match(r"_internal/(?:pytest|_pytest|google/genai/tests)(?:/|$)", relative_name)
+                or re.match(r"_internal/google/genai/_test_api_client(?:\.|/|$)", relative_name)):
             errors.append(f"development package in release: {rel}")
         if path.is_symlink():
             errors.append(f"symlink: {rel}")
@@ -101,4 +135,4 @@ if __name__ == "__main__":
         print(issue)
     if issues:
         sys.exit(1)
-    print("Release audit passed (allowlist and secret scan).")
+    print("Release audit passed (collected-module TOC, allowlist, certificate, and secret scan).")

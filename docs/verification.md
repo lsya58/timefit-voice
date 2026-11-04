@@ -96,6 +96,13 @@ Get-FileHash .\release\TimeFitVoice_*_v0.4.2-rc1.zip -Algorithm SHA256
 
 成功すると `release\TimeFitVoice_Free_v0.4.2-rc1.zip` と `release\TimeFitVoice_Pro_v0.4.2-rc1.zip` ができる。スクリプトが展開フォルダを allowlist・APIキー照合で監査してからZIPを作るので、手動でZIPを組み直さない。ZIP内には exe、`_internal`、サンプル2件、ガイド、利用条件、第三者ライセンスのみが入る。ハッシュ値を内部記録する。
 
+PyInstaller の `build`・`dist` が残り、アプリ本体を変更していない場合は、`-AuditOnly` で既存成果物を再監査してZIPを作れる。監査は `Analysis-00.toc` の実際に収集されたモジュールを判定し、問題があれば具体名を表示する。収集済みの不要モジュールが見つかった場合は、通常のビルドをやり直す（監査を迂回しない）。
+
+```powershell
+.\venv\Scripts\python.exe -m pytest -q tests\test_release.py
+.\scripts\build.ps1 -Edition free -AuditOnly
+```
+
 1. 両ZIPを別々の空フォルダへ展開し、各exeを起動する。画面に無料版／製品版と正しいバージョンが表示されること。`_internal` を外したexe単体では動かない。
 2. VOICEVOXを起動し、「サンプル字幕で試す」→「尺合わせを開始」。画面の「出力フォルダ」で `%LOCALAPPDATA%\TimeFitVoice\outputs\＜識別子＞\sample_output` を開き、`combined.wav`、`fitted.srt`、`report.csv` が作られ、試聴できること。サンプルは数行だけで、30行の再試行は不要。
 3. 設定に自分のGemini APIキーを入力して保存し、`%APPDATA%\TimeFitVoice\config.json` に平文キーがないことを確認する。キーを使わない場合はこの確認はテスト用のダミー値でよい。既存設定があるPCでは事前にバックアップし、移行後に他の設定値が維持されることを確認する。

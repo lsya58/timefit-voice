@@ -113,6 +113,11 @@ def test_certifi_bundle_only_allowed_when_identical_to_installed_source(tmp_path
     issues = audit(root, edition, toc, installed)
     assert any("development package" in issue for issue in issues)
     (root / "_internal" / "_pytest").rmdir()
+    (root / "_internal" / "google" / "genai").mkdir(parents=True)
+    test_client = root / "_internal" / "google" / "genai" / "_test_api_client.py"
+    test_client.write_text("# test helper", encoding="utf-8")
+    assert any("_test_api_client.py" in issue for issue in audit(root, edition, toc, installed))
+    test_client.unlink()
     (root / "_internal" / ".env").write_text("GEMINI_API_KEY=dummy", encoding="utf-8")
     (root / "_internal" / "config.json").write_text("{}", encoding="utf-8")
     issues = audit(root, edition, toc, installed)
@@ -131,11 +136,23 @@ def test_certifi_path_is_exact_but_windows_case_and_separators_are_accepted(tmp_
 
 
 def test_analysis_rejects_development_modules(tmp_path):
-    # The package audit must not pass if PyInstaller bundled test-only modules in PYZ.
+    # Analysis-00.toc contains both requested hidden imports and collected TOC triples.
     root = tmp_path / "rc"
     root.mkdir()
     toc = tmp_path / "Analysis-00.toc"
-    toc.write_text("[('google.genai.tests.example', 'x', 'PYMODULE'), ('pytest', 'y', 'PYMODULE'), ('_pytest', 'z', 'PYMODULE')]", encoding="utf-8")
-    assert any("development module" in issue for issue in audit(root, "free", toc))
+    toc.write_text(repr(([], ["google.genai.tests.missing", "google.genai._test_api_client"],
+                         [("google.genai.types", "types.py", "PYMODULE")])), encoding="utf-8")
+    assert not any("collected development module" in issue for issue in audit(root, "free", toc))
+
+    toc.write_text(repr(([], ["google.genai.tests.missing"],
+                         [("google.genai._test_api_client", r"C:\venv\google\genai\_test_api_client.py", "PYMODULE"),
+                          ("_pytest", r"C:\venv\_pytest\__init__.py", "PYMODULE-1")])), encoding="utf-8")
+    issues = audit(root, "free", toc)
+    assert any("google.genai._test_api_client" in issue and "C:\\venv" in issue for issue in issues)
+    assert any("_pytest" in issue and "PYMODULE-1" in issue for issue in issues)
+    assert not any("google.genai.tests.missing" in issue for issue in issues)
+
+    toc.write_text("not a Python literal", encoding="utf-8")
+    assert any("cannot inspect collected modules" in issue for issue in audit(root, "free", toc))
     toc.unlink()
-    assert any("analysis file" in issue for issue in audit(root, "free", toc))
+    assert any("cannot inspect collected modules" in issue for issue in audit(root, "free", toc))
