@@ -81,10 +81,28 @@
 
 ## テスト7: exe・別の PC
 
-1. `.\scripts\build.ps1 -Edition free` で無料版を作る
-2. Python の入っていない PC（または別の Windows ユーザー）で `TimeFitVoice_Free.exe` を起動
-3. 「サンプル字幕で試す」が動く。`full_test.srt` を読み込むと「無料版は先頭 10 行まで」と出て、10行で止まる
-4. ウイルス対策ソフトの警告が出たかどうかを記録する
+以前の30行・24行目テストは再実施不要。配布形式と設定保存だけを下記の手順で確認する。
+
+Windows PowerShellでリポジトリ直下へ移動し、クリーンな仮想環境を用意する。ビルドはWindows上で行うこと（他OSのPyInstallerからWindows exeは生成できない）。
+
+```powershell
+cd C:\path\to\timefit-voice
+py -3 -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\scripts\build.ps1 -Edition free
+.\scripts\build.ps1 -Edition pro
+Get-FileHash .\release\TimeFitVoice_*_v0.4.2-rc1.zip -Algorithm SHA256
+```
+
+成功すると `release\TimeFitVoice_Free_v0.4.2-rc1.zip` と `release\TimeFitVoice_Pro_v0.4.2-rc1.zip` ができる。スクリプトが展開フォルダを allowlist・APIキー照合で監査してからZIPを作るので、手動でZIPを組み直さない。ZIP内には exe、`_internal`、サンプル2件、ガイド、利用条件、第三者ライセンスのみが入る。ハッシュ値を内部記録する。
+
+1. 両ZIPを別々の空フォルダへ展開し、各exeを起動する。画面に無料版／製品版と正しいバージョンが表示されること。`_internal` を外したexe単体では動かない。
+2. VOICEVOXを起動し、「サンプル字幕で試す」→「尺合わせを開始」。画面の「出力フォルダ」で `%LOCALAPPDATA%\TimeFitVoice\outputs\＜識別子＞\sample_output` を開き、`combined.wav`、`fitted.srt`、`report.csv` が作られ、試聴できること。サンプルは数行だけで、30行の再試行は不要。
+3. 設定に自分のGemini APIキーを入力して保存し、`%APPDATA%\TimeFitVoice\config.json` に平文キーがないことを確認する。キーを使わない場合はこの確認はテスト用のダミー値でよい。既存設定があるPCでは事前にバックアップし、移行後に他の設定値が維持されることを確認する。
+4. 無料版で11行以上の手持ちSRTを読み込むと10行制限が出ること、製品版では同じ制限が出ないことを確認する。音声生成は不要。
+5. Python未導入の別Windows PCで、ZIPを展開しexeを起動する。WebView2がなければMicrosoft公式から導入する。VOICEVOXを別途起動しサンプルから `combined.wav` を1本生成・再生する。設定と出力が展開先でなくユーザーフォルダに作られることを確認する。
+
+コード署名は行っていないためSmartScreen等の警告が出る可能性がある。発生時は表示を記録し、ハッシュ・入手元を照合する。不明な警告を無条件に回避しない。別PC・別ユーザーではDPAPIのキーを引き継げないため、本人のキーを入力し直す。
 
 ---
 

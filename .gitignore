@@ -15,5 +15,6 @@ dist/
 release/
 *.spec
 timefit/_build_edition.py
+edition.txt
 *_output/
 .pytest_cache/

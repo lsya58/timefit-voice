@@ -1,12 +1,18 @@
 """無料版 / 製品版の切り替え
 
-配布用の exe を作るときは scripts/build.ps1 が timefit/_build_edition.py を生成して版を決める。
-開発中（そのファイルが無いとき）は製品版として動く。
+配布用の exe を作るときは scripts/build.ps1 が edition.txt を同梱して版を決める。
+開発中は製品版として動く。
 """
 
-try:
-    from ._build_edition import EDITION  # type: ignore
-except ImportError:
+import sys
+from pathlib import Path
+
+if getattr(sys, "frozen", False):
+    marker = Path(sys._MEIPASS) / "edition.txt"
+    EDITION = marker.read_text(encoding="ascii").strip()
+    if EDITION not in {"free", "pro"}:
+        raise RuntimeError("配布版の識別情報が正しくありません。")
+else:
     EDITION = "pro"
 
 FREE_LINE_LIMIT = 10

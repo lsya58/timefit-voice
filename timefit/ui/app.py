@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .. import APP_NAME, __version__, edition
 from ..batch import JobSummary, estimate_text, refit_line, run_job, suggest_candidates
-from ..config import AppConfig, load_config, save_config
+from ..config import AppConfig, default_config_path, default_output_path, load_config, save_config
 from ..diagnose import diagnose
 from ..engine import VoicevoxClient
 from ..errors import TimeFitError
@@ -84,6 +84,8 @@ class Api:
         self._config_error = None
         try:
             self._cfg = load_config()
+            if getattr(sys, "frozen", False) and not default_config_path().exists():
+                save_config(self._cfg)
         except TimeFitError as e:
             self._cfg = AppConfig()
             self._config_error = str(e)
@@ -177,7 +179,7 @@ class Api:
             "path": str(p),
             "name": p.name,
             "kind": script.kind,
-            "output": str(p.with_name(p.stem + "_output")),
+            "output": str(default_output_path(p)),
             "lines": [_line_dict(ln, self._cfg.default_speaker) for ln in script.lines],
         }
 
@@ -201,7 +203,7 @@ class Api:
         input_path = params.get("input")
         if not input_path:
             return {"ok": False, "error": "台本ファイルを選んでください。"}
-        output = params.get("output") or str(Path(input_path).with_name(Path(input_path).stem + "_output"))
+        output = params.get("output") or str(default_output_path(input_path))
         saved = self.save_settings({k: params[k] for k in
                                     ("default_speaker", "fit_mode", "max_speed", "allow_rewrite") if k in params})
         if not saved["ok"]:

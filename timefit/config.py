@@ -1,12 +1,16 @@
 """設定の読み書き。保存先は Windows なら %APPDATA%\\TimeFitVoice\\config.json"""
 
 import json
+import hashlib
 import os
+import sys
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from .errors import ConfigError
 from .fitter import FitMode, FitSettings
+from .dpapi import protect_key, unprotect_key
 
 
 @dataclass
@@ -58,6 +62,18 @@ def default_config_path() -> Path:
     return Path.home() / ".config" / "timefit-voice" / "config.json"
 
 
+def default_output_path(input_path: str | Path) -> Path:
+    """Keep generated audio outside the executable/ZIP and source directory."""
+    source = Path(input_path)
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if base:
+        source_id = hashlib.sha256(str(source.resolve()).encode("utf-8")).hexdigest()[:8]
+        return Path(base) / "TimeFitVoice" / "outputs" / source_id / (source.stem + "_output")
+    if getattr(sys, "frozen", False):
+        return Path.home() / "TimeFitVoice" / "outputs" / (source.stem + "_output")
+    return source.with_name(source.stem + "_output")
+
+
 def load_config(path: Path | None = None) -> AppConfig:
     path = path or default_config_path()
     cfg = AppConfig()
@@ -66,7 +82,12 @@ def load_config(path: Path | None = None) -> AppConfig:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise ConfigError(f"設定ファイルを読み込めませんでした: {path}（{e}）") from None
+        if not isinstance(data, dict):
+            raise ConfigError("設定ファイルの形式が正しくありません。")
         _migrate(data)
+        legacy_key = data.get("gemini_api_key", "")
+        if sys.platform == "win32" and data.get("gemini_api_key_protected"):
+            data["gemini_api_key"] = unprotect_key(data["gemini_api_key_protected"])
         known = {f.name for f in fields(AppConfig)}
         for key, value in data.items():
             if key not in known:
@@ -78,7 +99,7 @@ def load_config(path: Path | None = None) -> AppConfig:
                 raise ConfigError(f"設定ファイルの「{key}」の値が正しくありません: {value!r}") from None
 
     # 開発用: .env / 環境変数の GEMINI_API_KEY を、設定ファイルにキーがないときだけ使う
-    if not cfg.gemini_api_key:
+    if not cfg.gemini_api_key and not getattr(sys, "frozen", False):
         try:
             from dotenv import load_dotenv
 
@@ -88,6 +109,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         cfg.gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 
     cfg.validate()
+    if path.exists() and sys.platform == "win32" and legacy_key:
+        save_config(cfg, path)
     return cfg
 
 
@@ -102,6 +125,23 @@ def _migrate(data: dict) -> None:
 def save_config(cfg: AppConfig, path: Path | None = None) -> Path:
     cfg.validate()
     path = path or default_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(cfg), ensure_ascii=False, indent=2), encoding="utf-8")
+    data = asdict(cfg)
+    if sys.platform == "win32":
+        key = data.pop("gemini_api_key")
+        if key:
+            data["gemini_api_key_protected"] = protect_key(key)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".config-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(payload)
+        os.replace(temporary, path)
+    except OSError as exc:
+        raise ConfigError(f"設定ファイルを保存できませんでした: {path}（{exc}）") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return path
